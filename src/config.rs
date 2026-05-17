@@ -18,7 +18,7 @@ pub enum MqttAuth {
 
 /// Runtime configuration. All fields can be set via environment variables.
 pub struct Config {
-    /// UDP bind address for the CoAP/LWM2M server (default: [::]:5683).
+    /// UDP bind address for the CoAP/LWM2M server (default: [::]:20017).
     pub coap_bind_addr: SocketAddr,
 
     /// MQTT broker hostname or IP.
@@ -69,7 +69,7 @@ impl Config {
         };
 
         Ok(Config {
-            coap_bind_addr: env_parse("COAP_BIND_ADDR", "[::]:5683")?,
+            coap_bind_addr: env_parse("COAP_BIND_ADDR", "[::]:20017")?,
             mqtt_host: env_require("MQTT_HOST")?,
             mqtt_port: env_parse("MQTT_PORT", default_port)?,
             mqtt_client_id: env_require("MQTT_CLIENT_ID")?,

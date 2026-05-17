@@ -112,7 +112,7 @@ All configuration is via environment variables.
 | `TLS_CA_PATH` | TLS mode | — | PEM CA bundle |
 | `MQTT_USERNAME` | password mode | — | MQTT username |
 | `MQTT_PASSWORD` | password mode | `""` | MQTT password |
-| `COAP_BIND_ADDR` | no | `[::]:5683` | UDP bind address for CoAP |
+| `COAP_BIND_ADDR` | no | `[::]:20017` | UDP bind address for CoAP |
 | `REGISTRATION_GRACE_SECS` | no | `30` | Extra seconds before an expired registration is purged |
 | `RUST_LOG` | no | `lwm2m_gateway=info` | Log filter |
 
@@ -191,7 +191,7 @@ src/
 │
 ├── coap/
 │   ├── mod.rs        UDP socket bind helper; CoAP content-format constants.
-│   ├── server.rs     Inbound CoAP task. recv_from loop on [::]:5683.
+│   ├── server.rs     Inbound CoAP task. recv_from loop on [::]:20017.
 │   │                 Handles:
 │   │                   POST /rd          — device registration → 2.01 Created
 │   │                   POST /rd/<id>     — heartbeat → 2.04 Changed + drain ops
@@ -220,7 +220,7 @@ housekeeping.rs       60-second interval task. Expires stale device registration
 
 ```
                       ┌─────────────────────────────────────────┐
-UDP :5683 ───────────►│ coap_server_task                        │
+UDP :20017 ───────────►│ coap_server_task                        │
                       │   recv_from loop                        │
                       │   registration / heartbeat / ACK        │──► coap_dispatch_tx
                       └──────────────────┬──────────────────────┘
