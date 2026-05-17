@@ -5,7 +5,7 @@ use coap_lite::{
 };
 use tokio::{net::UdpSocket, sync::mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     error::Result,
@@ -34,6 +34,7 @@ pub async fn run(
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, addr)) => {
+                        info!(%addr, bytes = len, "CoAP packet received");
                         if let Err(e) = handle_packet(
                             &buf[..len],
                             addr,
@@ -166,7 +167,7 @@ async fn handle_registration(
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
     socket.send_to(&bytes, addr).await?;
 
-    debug!(%endpoint, id, %addr, "registration accepted");
+    info!(%endpoint, id, %addr, "device registered");
     Ok(())
 }
 
@@ -182,7 +183,7 @@ async fn handle_update(
     // Drain pending ops and hand them to the dispatch task.
     let ops = registry.drain_pending(addr).await;
     if !ops.is_empty() {
-        debug!(%addr, count = ops.len(), "dispatching pending ops on device update");
+        info!(%addr, count = ops.len(), "dispatching pending ops on device update");
         let _ = coap_dispatch_tx.send(DispatchRequest { addr, ops }).await;
     }
     Ok(())
