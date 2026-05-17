@@ -48,10 +48,14 @@ pub struct Config {
     /// (e.g. "coap://[fc00::6:100:0:0]"). Written to device Object 1 in the
     /// bootstrap write phase so devices know where to register afterwards.
     pub server_uri: Option<String>,
+
+    /// Raw network key loaded from --lb-key-file (hex field "network_key").
+    /// Written to LWM2M Security Object /0/1/5 during bootstrap write phase.
+    pub network_key: Vec<u8>,
 }
 
 impl Config {
-    /// Derive configuration from environment variables.
+    /// Derive configuration from environment variables and CLI arguments.
     ///
     /// Auth mode selection (first match wins):
     ///   TLS_CERT_PATH set          → mutual TLS (also requires TLS_KEY_PATH, TLS_CA_PATH)
@@ -78,6 +82,8 @@ impl Config {
             _ => "1883",
         };
 
+        let network_key = load_network_key()?;
+
         Ok(Config {
             coap_bind_addr: env_parse("COAP_BIND_ADDR", "[::]:20017")?,
             mqtt_host: env_require("MQTT_HOST")?,
@@ -88,8 +94,42 @@ impl Config {
             registration_grace_secs: env_parse("REGISTRATION_GRACE_SECS", "30")?,
             coap_interface: std::env::var("COAP_INTERFACE").ok(),
             server_uri: std::env::var("SERVER_URI").ok(),
+            network_key,
         })
     }
+}
+
+/// Parse `--lb-key-file <path>` from argv, read the JSON file, decode the
+/// hex value under "network_key".
+fn load_network_key() -> Result<Vec<u8>> {
+    let args: Vec<String> = std::env::args().collect();
+    let path = args
+        .windows(2)
+        .find(|w| w[0] == "--lb-key-file")
+        .map(|w| w[1].clone())
+        .ok_or_else(|| Error::Config("--lb-key-file <path> is required".into()))?;
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Config(format!("cannot read {path}: {e}")))?;
+
+    let json: serde_json::Value = serde_json::from_str(&content)?;
+
+    let hex_str = json["network_key"]
+        .as_str()
+        .ok_or_else(|| Error::Config("\"network_key\" missing or not a string in key file".into()))?;
+
+    decode_hex(hex_str)
+        .map_err(|e| Error::Config(format!("invalid hex in network_key: {e}")))
+}
+
+fn decode_hex(s: &str) -> std::result::Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err("odd length".into());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
 }
 
 fn env_require(key: &str) -> Result<String> {

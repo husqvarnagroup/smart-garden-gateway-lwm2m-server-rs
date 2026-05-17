@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = Config::from_env().map_err(|e| anyhow::anyhow!("{e}"))?;
     let registry = DeviceRegistry::new();
-    let bootstrap_registry = BootstrapRegistry::new();
+    let bootstrap_registry = BootstrapRegistry::new(cfg.network_key.clone(), cfg.server_uri.clone());
     let bootstrap_registry_hk = bootstrap_registry.clone();
     let cancel = CancellationToken::new();
 

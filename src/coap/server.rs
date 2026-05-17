@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use coap_lite::{
     CoapOption, MessageClass, MessageType, Packet, RequestType as Method, ResponseType as Status,
@@ -8,17 +8,19 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
-    bootstrap::BootstrapRegistry,
+    bootstrap::{self, BootstrapRegistry},
     error::Result,
     model::{LwM2mError, MqttResponse, PendingOperation, ResourceValue},
     registry::DeviceRegistry,
 };
 
-use super::RD_PATH;
+use super::{content_format::SENML_CBOR, RD_PATH};
 
 const BS_PATH: &str = "bs";
-
 const MAX_PACKET: usize = 1500;
+/// RFC 7252 retransmit defaults: up to 4 re-sends, 2 s initial backoff.
+const MAX_RETRANSMIT: u8 = 4;
+const ACK_TIMEOUT_SECS: u64 = 2;
 
 pub async fn run(
     socket: Arc<UdpSocket>,
@@ -101,6 +103,8 @@ async fn handle_packet(
             let token = token_array(packet.get_token());
             if bootstrap_registry.is_pending(&token).await {
                 warn!(%addr, "bootstrap GET /0/0 reset by device");
+            } else if bootstrap_registry.complete_write_ack(&token, false).await {
+                warn!(%addr, "bootstrap write op reset by device");
             } else if let Some(op) = registry.complete_in_flight(addr, &token).await {
                 let _ = op.response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
             }
@@ -159,10 +163,22 @@ async fn handle_bootstrap(
 
     // If the certificate is already cached this is the second /bs — ACK and proceed.
     if bootstrap_registry.has_cert(&endpoint).await {
-        info!(%endpoint, %addr, "bootstrap: certificate cached, ACKing /bs for write phase");
+        info!(%endpoint, %addr, "bootstrap: cert cached, ACKing second /bs for write phase");
         let bytes = make_response_bytes(&packet, Status::Changed, None)?;
         send_bootstrap_packet(socket, &bytes, addr).await?;
-        // TODO: bootstrap write phase (send network key derived via ECDH)
+
+        let Some(server_uri) = bootstrap_registry.server_uri().map(str::to_owned) else {
+            warn!(%endpoint, "bootstrap: SERVER_URI not configured — skipping write phase");
+            return Ok(());
+        };
+
+        let socket_clone = socket.clone();
+        let br = bootstrap_registry.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bootstrap_write_phase(endpoint, addr, socket_clone, br, server_uri).await {
+                tracing::error!("bootstrap write phase failed: {e}");
+            }
+        });
         return Ok(());
     }
 
@@ -172,9 +188,8 @@ async fn handle_bootstrap(
         return Ok(());
     };
 
-    // The original server waited ~3 s before sending GET /0/0. The device appears to need
-    // this window to open its response socket after transmitting the CON POST /bs.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // The device needs ~3 s after transmitting CON POST /bs to open its response socket.
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     let mut get = Packet::new();
     get.header.set_type(MessageType::Confirmable);
@@ -250,10 +265,8 @@ async fn handle_registration(
 
     // 2.01 Created with Location-Path: rd / <id>
     let mut response = make_response(&packet, Status::Created);
-    response
-        .add_option(CoapOption::LocationPath, b"rd".to_vec());
-    response
-        .add_option(CoapOption::LocationPath, id.to_string().into_bytes());
+    response.add_option(CoapOption::LocationPath, b"rd".to_vec());
+    response.add_option(CoapOption::LocationPath, id.to_string().into_bytes());
 
     let bytes = response
         .to_bytes()
@@ -291,13 +304,18 @@ async fn handle_ack(
 ) -> Result<()> {
     let token = token_array(packet.get_token());
 
-    // Check bootstrap sessions first (token IDs ≥ 0x8000_0000, no overlap with op tokens).
+    // Write-phase ACKs (DELETE /1, PUT /1/1, DELETE /0, PUT /0/1, POST /bs finish).
+    if bootstrap_registry.complete_write_ack(&token, true).await {
+        return Ok(());
+    }
+
+    // Bootstrap GET /0/0 ACK (token IDs ≥ 0x8000_0000, no overlap with op tokens).
     if bootstrap_registry.is_pending(&token).await {
         if let Some(session) = bootstrap_registry.complete(&token, packet.payload.clone()).await {
             info!(
                 endpoint = %session.endpoint,
                 bytes = session.pubkey_payload.as_ref().map_or(0, |p| p.len()),
-                "bootstrap: public key received — ready for ECDH"
+                "bootstrap: public key received — ready for write phase"
             );
         }
         return Ok(());
@@ -312,6 +330,140 @@ async fn handle_ack(
     let _ = op.response_tx.send(result);
     let _ = mqtt_out_tx; // used via subscriber wrapper
     Ok(())
+}
+
+// ── Bootstrap write phase ─────────────────────────────────────────────────────
+
+/// Execute the full bootstrap write sequence after ACKing the second POST /bs:
+///   CON DELETE /1  → CON PUT /1/1  → CON DELETE /0  → CON PUT /0/1  → CON POST /bs
+/// All packets are sent with TC=0x0c (no MAC-layer encryption).
+async fn bootstrap_write_phase(
+    endpoint: String,
+    addr: SocketAddr,
+    socket: Arc<UdpSocket>,
+    registry: BootstrapRegistry,
+    server_uri: String,
+) -> Result<()> {
+    info!(%endpoint, %addr, "bootstrap write phase starting");
+
+    let server_pubkey = registry.server_pubkey_bytes().to_vec();
+    let network_key = registry.network_key().to_vec();
+
+    // Step 1 — DELETE /1 (clear existing Server Object instances)
+    {
+        let (token, mid) = registry.alloc_token_mid().await;
+        let pkt = build_delete(mid, &token[..4], &["1"])?;
+        send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
+        info!(%endpoint, "bootstrap: DELETE /1 ACKed");
+    }
+
+    // Step 2 — PUT /1/1 (LWM2M Server Object: lifetime, binding, server ID)
+    {
+        let (token, mid) = registry.alloc_token_mid().await;
+        let payload = bootstrap::encode_server_object();
+        let pkt = build_put(mid, &token[..4], &["1", "1"], SENML_CBOR, payload)?;
+        send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
+        info!(%endpoint, "bootstrap: PUT /1/1 ACKed");
+    }
+
+    // Step 3 — DELETE /0 (clear existing Security Object instances)
+    {
+        let (token, mid) = registry.alloc_token_mid().await;
+        let pkt = build_delete(mid, &token[..4], &["0"])?;
+        send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
+        info!(%endpoint, "bootstrap: DELETE /0 ACKed");
+    }
+
+    // Step 4 — PUT /0/1 (LWM2M Security Object: URI, server pubkey, network key)
+    {
+        let (token, mid) = registry.alloc_token_mid().await;
+        let payload = bootstrap::encode_security_object(&server_uri, &server_pubkey, &network_key);
+        let pkt = build_put(mid, &token[..4], &["0", "1"], SENML_CBOR, payload)?;
+        send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
+        info!(%endpoint, "bootstrap: PUT /0/1 ACKed");
+    }
+
+    // Step 5 — POST /bs (bootstrap finish signal; device switches to encrypted traffic)
+    {
+        let (token, mid) = registry.alloc_token_mid().await;
+        let pkt = build_post_bs(mid, &token[..4])?;
+        send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
+        info!(%endpoint, %addr, "bootstrap: write phase complete — device now encrypted");
+    }
+
+    Ok(())
+}
+
+/// Send a CON request and wait for the ACK, retransmitting up to MAX_RETRANSMIT times.
+async fn send_con_write_step(
+    socket: &UdpSocket,
+    bytes: &[u8],
+    addr: SocketAddr,
+    token: [u8; 8],
+    registry: &BootstrapRegistry,
+) -> Result<()> {
+    let mut rx = registry.register_write_ack(token).await;
+    let mut delay = Duration::from_secs(ACK_TIMEOUT_SECS);
+
+    for attempt in 0..=MAX_RETRANSMIT {
+        if attempt > 0 {
+            tracing::debug!(attempt, %addr, "bootstrap write: retransmitting");
+        }
+        send_bootstrap_packet(socket, bytes, addr).await?;
+
+        tokio::select! {
+            biased;
+            result = &mut rx => {
+                return match result {
+                    Ok(true) => Ok(()),
+                    _ => Err(crate::error::Error::Coap("bootstrap write op rejected (RST)".into())),
+                };
+            }
+            _ = tokio::time::sleep(delay) => {
+                delay = (delay * 2).min(Duration::from_secs(32));
+            }
+        }
+    }
+
+    registry.cancel_write_ack(&token).await;
+    Err(crate::error::Error::Coap("bootstrap write: max retransmits exceeded".into()))
+}
+
+fn build_delete(mid: u16, token: &[u8], path: &[&str]) -> Result<Vec<u8>> {
+    let mut pkt = Packet::new();
+    pkt.header.set_type(MessageType::Confirmable);
+    pkt.header.code = MessageClass::Request(Method::Delete);
+    pkt.header.message_id = mid;
+    pkt.set_token(token.to_vec());
+    for part in path {
+        pkt.add_option(CoapOption::UriPath, part.as_bytes().to_vec());
+    }
+    pkt.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
+}
+
+fn build_put(mid: u16, token: &[u8], path: &[&str], cf: u16, payload: Vec<u8>) -> Result<Vec<u8>> {
+    let mut pkt = Packet::new();
+    pkt.header.set_type(MessageType::Confirmable);
+    pkt.header.code = MessageClass::Request(Method::Put);
+    pkt.header.message_id = mid;
+    pkt.set_token(token.to_vec());
+    for part in path {
+        pkt.add_option(CoapOption::UriPath, part.as_bytes().to_vec());
+    }
+    let cf_bytes = if cf <= 0xFF { vec![cf as u8] } else { vec![(cf >> 8) as u8, cf as u8] };
+    pkt.add_option(CoapOption::ContentFormat, cf_bytes);
+    pkt.payload = payload;
+    pkt.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
+}
+
+fn build_post_bs(mid: u16, token: &[u8]) -> Result<Vec<u8>> {
+    let mut pkt = Packet::new();
+    pkt.header.set_type(MessageType::Confirmable);
+    pkt.header.code = MessageClass::Request(Method::Post);
+    pkt.header.message_id = mid;
+    pkt.set_token(token.to_vec());
+    pkt.add_option(CoapOption::UriPath, b"bs".to_vec());
+    pkt.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
