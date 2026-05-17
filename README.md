@@ -72,12 +72,14 @@ The `-O` flag forces legacy SCP protocol — required because the gateway's Busy
 ```bash
 ssh root@192.168.1.61
 
-# TLS mode (AWS IoT Core)
+# TLS mode (AWS IoT Core) — with radio interface binding
 export MQTT_HOST=xxxx.iot.us-east-1.amazonaws.com
 export MQTT_CLIENT_ID=my-gateway
 export TLS_CERT_PATH=/etc/lwm2m/device.crt
 export TLS_KEY_PATH=/etc/lwm2m/device.key
 export TLS_CA_PATH=/etc/lwm2m/AmazonRootCA1.pem
+export COAP_INTERFACE=ppp0
+export SERVER_URI="coap://[fc00::6:100:0:0]"
 lwm2m-gateway
 
 # Username/password mode (Mosquitto etc.)
@@ -113,6 +115,8 @@ All configuration is via environment variables.
 | `MQTT_USERNAME` | password mode | — | MQTT username |
 | `MQTT_PASSWORD` | password mode | `""` | MQTT password |
 | `COAP_BIND_ADDR` | no | `[::]:20017` | UDP bind address for CoAP |
+| `COAP_INTERFACE` | no | — | Network interface for SO_BINDTODEVICE (e.g. `ppp0`) — ensures packets leave via the radio and carry the correct source address |
+| `SERVER_URI` | no | — | This server's CoAP URI (e.g. `coap://[fc00::6:100:0:0]`) — written to devices during bootstrap so they know where to register |
 | `REGISTRATION_GRACE_SECS` | no | `30` | Extra seconds before an expired registration is purged |
 | `RUST_LOG` | no | `lwm2m_gateway=info` | Log filter |
 
@@ -187,15 +191,28 @@ src/
 │                       complete_in_flight() — removes op when CoAP ACK arrives
 │                       expire_stale()    — purges devices past lifetime + grace period
 │
+├── bootstrap.rs      BootstrapRegistry — tracks the custom two-phase bootstrap:
+│                       Phase 1 (first POST /bs): server waits 3 s then sends CON
+│                         GET /0/0 with TC=0x0c (radio: no encryption) to read the
+│                         device's X.509 public key (SenML+CBOR, ~457 bytes).
+│                         The /bs CON is not ACKed; the device retransmits it.
+│                       Phase 2 (second POST /bs, after cert cached): server ACKs
+│                         and proceeds with bootstrap write (network key via ECDH).
+│                     Maintains cert_cache so the key survives repeated /bs bursts.
+│
 ├── error.rs          Unified Error enum (thiserror).
 │
 ├── coap/
-│   ├── mod.rs        UDP socket bind helper; CoAP content-format constants.
+│   ├── mod.rs        UDP socket bind helper (socket2, SO_BINDTODEVICE); CoAP
+│   │                 content-format constants.
 │   ├── server.rs     Inbound CoAP task. recv_from loop on [::]:20017.
 │   │                 Handles:
+│   │                   POST /bs          — bootstrap request → GET /0/0 (phase 1)
+│   │                                       or ACK (phase 2, cert cached)
 │   │                   POST /rd          — device registration → 2.01 Created
 │   │                   POST /rd/<id>     — heartbeat → 2.04 Changed + drain ops
-│   │                   ACK              — CoAP response → fires op oneshot
+│   │                   ACK              — CoAP response → bootstrap complete or
+│   │                                       fires op oneshot
 │   │                   RST              — fires op oneshot with CoapError
 │   └── client.rs     Outbound CoAP task. Receives DispatchRequest from channel,
 │                     builds CON requests, sends, retransmits up to 4× with
@@ -210,10 +227,10 @@ src/
     └── publisher.rs  Receives MqttResponse from channel, serializes to JSON,
                       publishes to the per-request response topic.
 
-housekeeping.rs       60-second interval task. Expires stale device registrations
-                      and times out in-flight ops that have not received an ACK,
-                      firing their oneshots with LwM2mError::Timeout so no MQTT
-                      response is silently dropped.
+housekeeping.rs       60-second interval task. Expires stale device registrations,
+                      times out in-flight ops (firing oneshots with Timeout), and
+                      expires stale bootstrap sessions (device sent /bs but never
+                      answered GET /0/0).
 ```
 
 ### Task topology

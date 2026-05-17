@@ -38,6 +38,16 @@ pub struct Config {
     /// How long (seconds) to keep a device registration alive after the
     /// declared lifetime expires before removing it from the registry.
     pub registration_grace_secs: u32,
+
+    /// Network interface to bind the CoAP socket to (SO_BINDTODEVICE).
+    /// Set to "ppp0" when the radio is on a PPP link to ensure packets leave
+    /// via the correct interface with the right source address.
+    pub coap_interface: Option<String>,
+
+    /// This server's CoAP URI advertised to devices during bootstrap
+    /// (e.g. "coap://[fc00::6:100:0:0]"). Written to device Object 1 in the
+    /// bootstrap write phase so devices know where to register afterwards.
+    pub server_uri: Option<String>,
 }
 
 impl Config {
@@ -76,6 +86,8 @@ impl Config {
             mqtt_auth,
             mqtt_topic_prefix: env_default("MQTT_TOPIC_PREFIX", "lwm2m"),
             registration_grace_secs: env_parse("REGISTRATION_GRACE_SECS", "30")?,
+            coap_interface: std::env::var("COAP_INTERFACE").ok(),
+            server_uri: std::env::var("SERVER_URI").ok(),
         })
     }
 }

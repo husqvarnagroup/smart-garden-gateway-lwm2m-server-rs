@@ -4,7 +4,7 @@ use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::{error::Result, model::MqttResponse, registry::DeviceRegistry};
+use crate::{bootstrap::BootstrapRegistry, error::Result, model::MqttResponse, registry::DeviceRegistry};
 
 /// Registration grace period before entries are purged (seconds beyond declared lifetime).
 const GRACE_SECS: u32 = 30;
@@ -13,8 +13,12 @@ const IN_FLIGHT_TIMEOUT_SECS: u64 = 60;
 /// How often housekeeping runs.
 const INTERVAL_SECS: u64 = 60;
 
+/// Bootstrap sessions older than this are considered dead (device never responded).
+const BOOTSTRAP_TIMEOUT_SECS: u64 = 30;
+
 pub async fn run(
     registry: DeviceRegistry,
+    bootstrap_registry: BootstrapRegistry,
     _mqtt_out_tx: mpsc::Sender<MqttResponse>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -33,6 +37,7 @@ pub async fn run(
                     warn!(count = expired.len(), endpoints = ?expired, "expired device registrations purged");
                 }
                 registry.timeout_in_flight(IN_FLIGHT_TIMEOUT_SECS).await;
+                bootstrap_registry.expire_stale(BOOTSTRAP_TIMEOUT_SECS).await;
             }
         }
     }

@@ -5,9 +5,10 @@ use coap_lite::{
 };
 use tokio::{net::UdpSocket, sync::mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
+    bootstrap::BootstrapRegistry,
     error::Result,
     model::{LwM2mError, MqttResponse, PendingOperation, ResourceValue},
     registry::DeviceRegistry,
@@ -15,11 +16,14 @@ use crate::{
 
 use super::RD_PATH;
 
+const BS_PATH: &str = "bs";
+
 const MAX_PACKET: usize = 1500;
 
 pub async fn run(
     socket: Arc<UdpSocket>,
     registry: DeviceRegistry,
+    bootstrap_registry: BootstrapRegistry,
     coap_dispatch_tx: mpsc::Sender<DispatchRequest>,
     mqtt_out_tx: mpsc::Sender<MqttResponse>,
     cancel: CancellationToken,
@@ -40,6 +44,7 @@ pub async fn run(
                             addr,
                             &socket,
                             &registry,
+                            &bootstrap_registry,
                             &coap_dispatch_tx,
                             &mqtt_out_tx,
                         )
@@ -66,6 +71,7 @@ async fn handle_packet(
     addr: SocketAddr,
     socket: &Arc<UdpSocket>,
     registry: &DeviceRegistry,
+    bootstrap_registry: &BootstrapRegistry,
     coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
     mqtt_out_tx: &mpsc::Sender<MqttResponse>,
 ) -> Result<()> {
@@ -79,7 +85,7 @@ async fn handle_packet(
         MessageType::Confirmable | MessageType::NonConfirmable => {
             match packet.header.code {
                 MessageClass::Request(Method::Post) => {
-                    handle_post(packet, addr, socket, registry, coap_dispatch_tx).await?;
+                    handle_post(packet, addr, socket, registry, bootstrap_registry, coap_dispatch_tx).await?;
                 }
                 other => {
                     warn!(%addr, ?other, "unexpected CoAP request method");
@@ -88,12 +94,14 @@ async fn handle_packet(
         }
         // Device acknowledging one of our downlink requests.
         MessageType::Acknowledgement => {
-            handle_ack(packet, addr, registry, mqtt_out_tx).await?;
+            handle_ack(packet, addr, registry, bootstrap_registry, mqtt_out_tx).await?;
         }
         MessageType::Reset => {
             // Device rejected our message — treat as error for the in-flight op.
             let token = token_array(packet.get_token());
-            if let Some(op) = registry.complete_in_flight(addr, &token).await {
+            if bootstrap_registry.is_pending(&token).await {
+                warn!(%addr, "bootstrap GET /0/0 reset by device");
+            } else if let Some(op) = registry.complete_in_flight(addr, &token).await {
                 let _ = op.response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
             }
         }
@@ -106,12 +114,17 @@ async fn handle_post(
     addr: SocketAddr,
     socket: &Arc<UdpSocket>,
     registry: &DeviceRegistry,
+    bootstrap_registry: &BootstrapRegistry,
     coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
 ) -> Result<()> {
     let path = uri_path(&packet);
     let path_parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
 
     match path_parts.as_slice() {
+        // POST /bs?ep=<name>&pct=<fmt>  — bootstrap request
+        [p] if *p == BS_PATH => {
+            handle_bootstrap(packet, addr, socket, bootstrap_registry).await?;
+        }
         // POST /rd?ep=<name>&lt=<lifetime>&b=U  — new registration
         [p] if *p == RD_PATH => {
             handle_registration(packet, addr, socket, registry).await?;
@@ -124,6 +137,86 @@ async fn handle_post(
             warn!(%addr, path, "POST to unknown path");
             send_response(socket, addr, &packet, Status::NotFound, None).await?;
         }
+    }
+    Ok(())
+}
+
+async fn handle_bootstrap(
+    packet: Packet,
+    addr: SocketAddr,
+    socket: &Arc<UdpSocket>,
+    bootstrap_registry: &BootstrapRegistry,
+) -> Result<()> {
+    let query = uri_query(&packet);
+    let params = parse_query(&query);
+
+    let endpoint = params.get("ep").cloned().unwrap_or_default();
+    if endpoint.is_empty() {
+        warn!(%addr, "bootstrap request missing ep parameter");
+        send_response(socket, addr, &packet, Status::BadRequest, None).await?;
+        return Ok(());
+    }
+
+    // If the certificate is already cached this is the second /bs — ACK and proceed.
+    if bootstrap_registry.has_cert(&endpoint).await {
+        info!(%endpoint, %addr, "bootstrap: certificate cached, ACKing /bs for write phase");
+        let bytes = make_response_bytes(&packet, Status::Changed, None)?;
+        send_bootstrap_packet(socket, &bytes, addr).await?;
+        // TODO: bootstrap write phase (send network key derived via ECDH)
+        return Ok(());
+    }
+
+    // First /bs: do NOT ACK — just trigger the CON GET /0/0 to read the device certificate.
+    let Some((token, mid)) = bootstrap_registry.begin(endpoint.clone(), addr).await else {
+        info!(%endpoint, "bootstrap: GET /0/0 already in flight, ignoring duplicate /bs");
+        return Ok(());
+    };
+
+    // The original server waited ~3 s before sending GET /0/0. The device appears to need
+    // this window to open its response socket after transmitting the CON POST /bs.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let mut get = Packet::new();
+    get.header.set_type(MessageType::Confirmable);
+    get.header.code = MessageClass::Request(Method::Get);
+    get.header.message_id = mid;
+    get.set_token(token[..4].to_vec()); // 4-byte token — device echoes it back
+    get.add_option(CoapOption::UriPath, b"0".to_vec());
+    get.add_option(CoapOption::UriPath, b"0".to_vec());
+
+    let bytes = get
+        .to_bytes()
+        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
+    // TC=0x0c signals the radio module: no MAC-layer encryption yet.
+    send_bootstrap_packet(socket, &bytes, addr).await?;
+
+    info!(%endpoint, %addr, mid, "bootstrap: sent CON GET /0/0 (TC=0x0c, /bs not ACKed)");
+    Ok(())
+}
+
+fn make_response_bytes(request: &Packet, status: Status, payload: Option<Vec<u8>>) -> Result<Vec<u8>> {
+    let mut response = make_response(request, status);
+    if let Some(body) = payload {
+        response.payload = body;
+    }
+    response.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
+}
+
+/// Send a bootstrap-phase CoAP packet with IPv6 Traffic Class 0x0c.
+/// TC=0x0c tells the radio module not to apply MAC-layer encryption,
+/// which is required before the network key has been exchanged.
+/// On macOS (dev builds) TC is not settable; the warning is expected.
+async fn send_bootstrap_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAddr) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use socket2::SockRef;
+        SockRef::from(socket).set_tclass_v6(0x0c)?;
+    }
+    socket.send_to(bytes, addr).await?;
+    #[cfg(target_os = "linux")]
+    {
+        use socket2::SockRef;
+        SockRef::from(socket).set_tclass_v6(0)?;
     }
     Ok(())
 }
@@ -193,36 +286,31 @@ async fn handle_ack(
     packet: Packet,
     addr: SocketAddr,
     registry: &DeviceRegistry,
+    bootstrap_registry: &BootstrapRegistry,
     mqtt_out_tx: &mpsc::Sender<MqttResponse>,
 ) -> Result<()> {
     let token = token_array(packet.get_token());
+
+    // Check bootstrap sessions first (token IDs ≥ 0x8000_0000, no overlap with op tokens).
+    if bootstrap_registry.is_pending(&token).await {
+        if let Some(session) = bootstrap_registry.complete(&token, packet.payload.clone()).await {
+            info!(
+                endpoint = %session.endpoint,
+                bytes = session.pubkey_payload.as_ref().map_or(0, |p| p.len()),
+                "bootstrap: public key received — ready for ECDH"
+            );
+        }
+        return Ok(());
+    }
+
     let Some(op) = registry.complete_in_flight(addr, &token).await else {
         // Spurious or duplicate ACK — ignore.
         return Ok(());
     };
 
     let result = coap_response_to_result(&packet);
-    let path = match &op.command {
-        crate::model::LwM2mCommand::Read { path }
-        | crate::model::LwM2mCommand::Write { path, .. }
-        | crate::model::LwM2mCommand::Execute { path, .. } => path.clone(),
-    };
-
-    // Fire the oneshot so the MQTT publisher gets the result.
-    // The response_tx carries a LwM2mResult; we need to also route to MQTT.
-    // We use a side-channel: build an MqttResponse directly here using
-    // the endpoint name recovered from the op's context (stored in command path).
-    // Since PendingOperation doesn't carry the endpoint/correlation_id, we use
-    // a wrapper approach: the MQTT subscriber wraps the oneshot in a future
-    // that maps the result to MqttResponse. See mqtt/subscriber.rs.
-    let _ = op.response_tx.send(result.clone());
-
-    // Also publish directly if result is available (belt-and-suspenders path
-    // for operations queued without an MQTT correlation wrapper).
-    // In normal flow the subscriber's spawned future handles publishing.
-    let _ = mqtt_out_tx; // suppress unused warning; used via subscriber wrapper
-    let _ = path;
-
+    let _ = op.response_tx.send(result);
+    let _ = mqtt_out_tx; // used via subscriber wrapper
     Ok(())
 }
 

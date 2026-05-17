@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes          = "1"
 tokio-util     = { version = "0.7", features = ["rt"] }
 anyhow         = "1"
+socket2        = { version = "0.5", features = ["all"] }
 
 [profile.release]
 opt-level     = "z"

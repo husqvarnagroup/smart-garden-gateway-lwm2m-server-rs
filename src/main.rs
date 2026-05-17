@@ -1,3 +1,4 @@
+mod bootstrap;
 mod coap;
 mod config;
 mod error;
@@ -13,6 +14,7 @@ use tracing::info;
 use rumqttc::AsyncClient;
 
 use crate::{
+    bootstrap::BootstrapRegistry,
     coap::server::DispatchRequest,
     config::Config,
     model::MqttResponse,
@@ -30,9 +32,11 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = Config::from_env().map_err(|e| anyhow::anyhow!("{e}"))?;
     let registry = DeviceRegistry::new();
+    let bootstrap_registry = BootstrapRegistry::new();
+    let bootstrap_registry_hk = bootstrap_registry.clone();
     let cancel = CancellationToken::new();
 
-    let socket = coap::bind(cfg.coap_bind_addr)
+    let socket = coap::bind(cfg.coap_bind_addr, cfg.coap_interface.as_deref())
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -60,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
         r = coap::server::run(
             socket.clone(),
             registry.clone(),
+            bootstrap_registry,
             coap_dispatch_tx.clone(),
             mqtt_out_tx.clone(),
             cancel.clone(),
@@ -90,7 +95,8 @@ async fn main() -> anyhow::Result<()> {
 
         r = housekeeping::run(
             registry,
-            mpsc::channel(1).0, // housekeeping only needs the sender type for future use
+            bootstrap_registry_hk,
+            mpsc::channel(1).0,
             cancel,
         ) => { r.map_err(|e| anyhow::anyhow!("housekeeping: {e}"))? }
     }
