@@ -1,0 +1,3 @@
+# Cross-compilation settings.
+# When using `cross build --target armv5te-unknown-linux-gnueabi`, cross manages
+# the toolchain inside its Docker container — no manual linker/CC overrides needed.

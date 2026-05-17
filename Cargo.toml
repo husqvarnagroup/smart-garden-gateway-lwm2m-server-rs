@@ -1,0 +1,27 @@
+[package]
+name = "lwm2m-gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio          = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "macros", "signal"] }
+coap-lite      = "0.11"
+rumqttc        = { version = "0.24", features = ["use-rustls"] }
+# rumqttc 0.24 pulls tokio-rustls 0.25 → rustls 0.22; must match.
+# default-features=false + ring avoids aws-lc-sys (C/cmake), which doesn't cross-compile to armv5te.
+rustls         = { version = "0.22", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+thiserror      = "1"
+tracing        = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes          = "1"
+tokio-util     = { version = "0.7", features = ["rt"] }
+anyhow         = "1"
+
+[profile.release]
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+strip         = true
