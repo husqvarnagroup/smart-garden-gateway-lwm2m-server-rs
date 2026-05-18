@@ -3,21 +3,18 @@ mod coap;
 mod config;
 mod error;
 mod housekeeping;
+mod ipc;
 mod model;
-mod mqtt;
 mod registry;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use rumqttc::AsyncClient;
-
 use crate::{
     bootstrap::BootstrapRegistry,
     coap::server::DispatchRequest,
     config::Config,
-    model::MqttResponse,
     registry::DeviceRegistry,
 };
 
@@ -41,12 +38,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let (coap_dispatch_tx, coap_dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
-    let (mqtt_out_tx, mqtt_out_rx) = mpsc::channel::<MqttResponse>(256);
 
-    let (mqtt_client, event_loop): (AsyncClient, _) =
-        mqtt::build_client(&cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    // Wire up SIGTERM / Ctrl-C to graceful shutdown.
     {
         let cancel = cancel.clone();
         tokio::spawn(async move {
@@ -56,8 +48,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let topic_prefix = cfg.mqtt_topic_prefix.clone();
-
     info!("lwm2m-gateway starting");
 
     tokio::select! {
@@ -65,8 +55,7 @@ async fn main() -> anyhow::Result<()> {
             socket.clone(),
             registry.clone(),
             bootstrap_registry,
-            coap_dispatch_tx.clone(),
-            mqtt_out_tx.clone(),
+            coap_dispatch_tx,
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap server: {e}"))? }
 
@@ -77,28 +66,15 @@ async fn main() -> anyhow::Result<()> {
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap dispatch: {e}"))? }
 
-        r = mqtt::subscriber::run(
-            mqtt_client.clone(),
-            event_loop,
-            registry.clone(),
-            coap_dispatch_tx,
-            mqtt_out_tx,
-            topic_prefix,
-            cancel.clone(),
-        ) => { r.map_err(|e| anyhow::anyhow!("mqtt subscriber: {e}"))? }
-
-        r = mqtt::publisher::run(
-            mqtt_client,
-            mqtt_out_rx,
-            cancel.clone(),
-        ) => { r.map_err(|e| anyhow::anyhow!("mqtt publisher: {e}"))? }
-
         r = housekeeping::run(
             registry,
             bootstrap_registry_hk,
-            mpsc::channel(1).0,
-            cancel,
+            cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("housekeeping: {e}"))? }
+
+        r = ipc::run(cancel.clone()) => {
+            r.map_err(|e| anyhow::anyhow!("ipc: {e}"))?
+        }
     }
 
     info!("lwm2m-gateway stopped");

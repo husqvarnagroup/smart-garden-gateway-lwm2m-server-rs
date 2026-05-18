@@ -1,16 +1,13 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use crate::model::{Device, DeviceId, LwM2mCommand, LwM2mError, LwM2mResult, PendingOperation};
+use crate::model::{Device, DeviceId, LwM2mError, PendingOperation};
 
 struct RegistryInner {
     by_id: HashMap<DeviceId, Device>,
@@ -22,7 +19,6 @@ struct RegistryInner {
 #[derive(Clone)]
 pub struct DeviceRegistry {
     inner: Arc<RwLock<RegistryInner>>,
-    op_counter: Arc<AtomicU32>,
 }
 
 impl DeviceRegistry {
@@ -34,7 +30,6 @@ impl DeviceRegistry {
                 by_addr: HashMap::new(),
                 next_id: 1,
             })),
-            op_counter: Arc::new(AtomicU32::new(1)),
         }
     }
 
@@ -88,33 +83,6 @@ impl DeviceRegistry {
             // addr won't differ here since we looked up by addr, but guard for safety.
             dev.addr = addr;
         }
-    }
-
-    /// Enqueue an operation for a device identified by endpoint name.
-    /// Returns Err if the device is not registered.
-    pub async fn enqueue_op(
-        &self,
-        endpoint: &str,
-        command: LwM2mCommand,
-        response_tx: tokio::sync::oneshot::Sender<LwM2mResult>,
-    ) -> Result<u32, String> {
-        let op_id = self.op_counter.fetch_add(1, Ordering::Relaxed);
-        let op = PendingOperation {
-            id: op_id,
-            command,
-            response_tx,
-            created_at: std::time::Instant::now(),
-            attempts: 0,
-        };
-
-        let mut inner = self.inner.write().await;
-        let id = *inner
-            .by_endpoint
-            .get(endpoint)
-            .ok_or_else(|| format!("endpoint {endpoint} not registered"))?;
-        inner.by_id.get_mut(&id).unwrap().pending_ops.push_back(op);
-        debug!(endpoint, op_id, "operation enqueued");
-        Ok(op_id)
     }
 
     /// Drain all pending operations for the device at `addr`.
@@ -196,11 +164,5 @@ impl DeviceRegistry {
         }
     }
 
-    /// Retrieve a device's socket address by endpoint name (for dispatching).
-    pub async fn addr_for_endpoint(&self, endpoint: &str) -> Option<SocketAddr> {
-        let inner = self.inner.read().await;
-        let id = inner.by_endpoint.get(endpoint)?;
-        Some(inner.by_id.get(id)?.addr)
-    }
 
 }

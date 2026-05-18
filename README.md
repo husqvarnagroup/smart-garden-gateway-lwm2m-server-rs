@@ -1,10 +1,10 @@
 # lwm2m-gateway
 
-Rust service running on an embedded Linux gateway. It acts as an LWM2M server for IoT devices communicating over a proprietary radio (PPP/IPv6) and bridges commands from AWS IoT Core (or any MQTT broker) to LWM2M Read/Write/Execute operations.
+Rust service running on an embedded Linux gateway. It acts as an LWM2M server for IoT devices communicating over a proprietary radio (PPP/IPv6) and exposes a Unix domain socket for local command/event integration.
 
 ```
-AWS IoT Core  ──MQTT/TLS──►  lwm2m-gateway  ──CoAP/UDP/IPv6──►  IoT devices
-                              (on gateway)         (ppp0)
+local process  ──IPC (Unix socket)──►  lwm2m-gateway  ──CoAP/UDP/IPv6──►  IoT devices
+                                        (on gateway)         (ppp0)
 ```
 
 ---
@@ -67,99 +67,99 @@ scp -O target/armv5te-unknown-linux-gnueabi/release/lwm2m-gateway \
 
 The `-O` flag forces legacy SCP protocol — required because the gateway's BusyBox SSH does not include an SFTP server.
 
-### Run on the gateway
+---
+
+## Usage
 
 ```bash
-ssh root@192.168.1.61
-
-# TLS mode (AWS IoT Core) — with radio interface binding
-export MQTT_HOST=xxxx.iot.us-east-1.amazonaws.com
-export MQTT_CLIENT_ID=my-gateway
-export TLS_CERT_PATH=/etc/lwm2m/device.crt
-export TLS_KEY_PATH=/etc/lwm2m/device.key
-export TLS_CA_PATH=/etc/lwm2m/AmazonRootCA1.pem
-export COAP_INTERFACE=ppp0
-export SERVER_URI="coap://[fc00::6:100:0:0]"
-lwm2m-gateway
-
-# Username/password mode (Mosquitto etc.)
-export MQTT_HOST=192.168.1.10
-export MQTT_CLIENT_ID=my-gateway
-export MQTT_USERNAME=gateway
-export MQTT_PASSWORD=secret
-lwm2m-gateway
-
-# Anonymous mode (local broker, no auth)
-export MQTT_HOST=192.168.1.10
-export MQTT_CLIENT_ID=my-gateway
-lwm2m-gateway
+lwm2m-gateway ppp0 --bind-to-device \
+    --server-uri "coap://[fc00::6:100:0:0]" \
+    --port 20017 \
+    --lb-key-file /var/lib/lemonbeatd/Network_management/Network_key.json
 ```
 
 Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2m_gateway=debug`.
 
----
+### Arguments
 
-## Configuration reference
-
-All configuration is via environment variables.
-
-| Variable | Required | Default | Description |
+| Argument | Required | Default | Description |
 |---|---|---|---|
-| `MQTT_HOST` | yes | — | MQTT broker hostname or IP |
-| `MQTT_CLIENT_ID` | yes | — | MQTT client ID |
-| `MQTT_PORT` | no | `8883` (TLS) / `1883` (plain) | MQTT port |
-| `MQTT_TOPIC_PREFIX` | no | `lwm2m` | Topic prefix (see below) |
-| `TLS_CERT_PATH` | TLS mode | — | PEM device certificate |
-| `TLS_KEY_PATH` | TLS mode | — | PEM private key |
-| `TLS_CA_PATH` | TLS mode | — | PEM CA bundle |
-| `MQTT_USERNAME` | password mode | — | MQTT username |
-| `MQTT_PASSWORD` | password mode | `""` | MQTT password |
-| `COAP_BIND_ADDR` | no | `[::]:20017` | UDP bind address for CoAP |
-| `COAP_INTERFACE` | no | — | Network interface for SO_BINDTODEVICE (e.g. `ppp0`) — ensures packets leave via the radio and carry the correct source address |
-| `SERVER_URI` | no | — | This server's CoAP URI (e.g. `coap://[fc00::6:100:0:0]`) — written to devices during bootstrap so they know where to register |
-| `REGISTRATION_GRACE_SECS` | no | `30` | Extra seconds before an expired registration is purged |
-| `RUST_LOG` | no | `lwm2m_gateway=info` | Log filter |
-
-**Auth mode is selected automatically** by which variables are present:
-1. `TLS_CERT_PATH` set → mutual TLS
-2. `MQTT_USERNAME` set → username/password over plain TCP
-3. Neither → anonymous plain TCP
+| `<interface>` | yes | — | Network interface for CoAP traffic (e.g. `ppp0`) |
+| `--bind-to-device` | no | off | Bind CoAP socket to the interface via `SO_BINDTODEVICE` |
+| `--server-uri` | no | `coap://[fc00::6:100:0:0]` | This server's CoAP URI written to devices during bootstrap |
+| `--port` | no | `20017` | UDP port to listen on |
+| `--lb-key-file` | no | `/var/lib/lemonbeatd/…/Network_key.json` | JSON file containing `"network_key"` as a hex string |
+| `RUST_LOG` | no | `lwm2m_gateway=info` | Log filter (env var) |
 
 ---
 
-## MQTT topic convention
+## IPC command socket
 
-| Direction | Topic pattern | Description |
-|---|---|---|
-| Inbound (broker → gateway) | `lwm2m/cmd/{endpoint}` | Command to execute on a device |
-| Outbound (gateway → broker) | `lwm2m/resp/{endpoint}/{correlation_id}` | Result of the command |
+The gateway listens on `/tmp/lwm2mserver-command.ipc` (Unix domain socket). Messages are newline-terminated JSON arrays.
 
-### Command payload (JSON)
+### List registered devices
 
+Request:
 ```json
-{
-  "correlationId": "abc-123",
-  "endpoint": "sensor-01",
-  "operation": "read",
-  "path": { "objectId": 3, "instanceId": 0, "resourceId": 0 },
-  "responseTopic": "lwm2m/resp/sensor-01/abc-123"
-}
+[{"op":"read","entity":{"service":"lwm2mserver","path":"devices"}}]
 ```
 
-`operation` is `"read"`, `"write"`, or `"execute"`. Write requires a `"value"` field; execute accepts an optional `"value"` as arguments.
-
-### Response payload (JSON)
-
+Response:
 ```json
-{
-  "correlationId": "abc-123",
-  "endpoint": "sensor-01",
-  "path": { "objectId": 3, "instanceId": 0, "resourceId": 0 },
-  "value": { "text": "lwm2m-gateway" }
-}
+[{"payload":{},"success":true}]
 ```
 
-On failure, `"error"` is present instead of `"value"`.
+---
+
+## Bootstrap protocol
+
+Devices must be provisioned with the server address and network key before they can register. This is done via a proprietary two-phase bootstrap over the `/bs` path.
+
+### IPv6 Traffic Class
+
+The radio module uses the IPv6 Traffic Class byte to control MAC-layer encryption:
+
+| TC | Meaning |
+|---|---|
+| `0x0c` | No MAC encryption — used before the network key is exchanged |
+| `0x1c` | MAC encryption active — used after bootstrap completes |
+
+All bootstrap packets (server → device) are sent with TC=0x0c. All post-bootstrap traffic (registration responses, data push ACKs) uses TC=0x1c.
+
+### Phase 1 — read device public key
+
+1. Device sends `CON POST /bs?ep=<name>` (TC=0x0c). The server does **not** ACK this immediately.
+2. After a 3-second delay (to let the device open its response socket), the server sends `CON GET /0/0` with TC=0x0c.
+3. Device responds with its X.509 DER certificate. The server extracts the P-256 public key and caches it under the device endpoint name.
+4. Because the initial `POST /bs` was never ACKed, the device retransmits it, triggering Phase 2.
+
+### Phase 2 — write network credentials
+
+On receiving the second `POST /bs` (after the cert is cached):
+
+1. Server sends `2.04 Changed` ACK (TC=0x0c).
+2. Server executes the write sequence — all packets are CON with TC=0x0c, each waits for device ACK before proceeding (RFC 7252 retransmit: 2 s initial, up to 4 retries, exponential backoff):
+
+| Step | Operation | Object | Content |
+|---|---|---|---|
+| 1 | `DELETE /1` | Server Object | Clear existing server instances |
+| 2 | `PUT /1/1` | Server Object | Short Server ID=1, Lifetime=86400, Binding="U" (SenML+CBOR) |
+| 3 | `DELETE /0` | Security Object | Clear existing security instances |
+| 4 | `PUT /0/1` | Security Object | Server URI, server public key, encrypted network key (SenML+CBOR) |
+| 5 | `POST /bs` | — | Bootstrap finish signal |
+
+After the device ACKs `POST /bs` it switches to encrypted traffic (TC=0x1c).
+
+### Credentials
+
+- **Server public key**: an ephemeral P-256 keypair is generated at process startup. The compressed 33-byte public key is written to `/0/1/4`.
+- **Network key**: a 16-byte key read from the JSON file passed via `--lb-key-file`. The file must contain a `"network_key"` field as a lowercase hex string:
+
+```json
+{ "network_key": "be3960fa8ccd1e306e579096dcecc0d6" }
+```
+
+The key is ECDH-encrypted for the device (ECIES: AES-128-GCM using the shared secret derived from the server's ephemeral private key and the device's P-256 public key from its X.509 certificate) and written to `/0/1/5`.
 
 ---
 
@@ -167,99 +167,77 @@ On failure, `"error"` is present instead of `"value"`.
 
 ```
 src/
-├── main.rs           Entry point. Spawns five long-running tasks under a shared
+├── main.rs           Entry point. Spawns four long-running tasks under a shared
 │                     CancellationToken; any task failure brings down the process
 │                     (suitable for systemd restart).
 │
-├── config.rs         Config::from_env() — all runtime parameters, including the
-│                     MqttAuth enum that selects TLS / password / anonymous mode.
+├── config.rs         Config::from_args() — clap-based CLI argument parsing.
 │
 ├── model.rs          Shared domain types:
 │                       Device            — registered device state
 │                       PendingOperation  — queued or in-flight CoAP op
 │                       LwM2mCommand      — Read / Write / Execute
-│                       MqttCommand       — parsed inbound MQTT payload
-│                       MqttResponse      — outbound MQTT payload
 │
 ├── registry.rs       DeviceRegistry (Arc<RwLock<…>>). Owns all device state.
 │                     Key operations:
-│                       register()        — called on CoAP POST /rd
-│                       touch()           — updates last-contact on any inbound packet
-│                       enqueue_op()      — queues an op from the MQTT subscriber
-│                       drain_pending()   — returns queued ops on device heartbeat
-│                       place_in_flight() — moves a sent op to the awaiting-ACK map
+│                       register()           — called on CoAP POST /rd
+│                       touch()              — updates last-contact on any packet
+│                       drain_pending()      — returns queued ops on device heartbeat
+│                       place_in_flight()    — moves a sent op to the awaiting-ACK map
 │                       complete_in_flight() — removes op when CoAP ACK arrives
-│                       expire_stale()    — purges devices past lifetime + grace period
+│                       expire_stale()       — purges devices past lifetime + grace
 │
-├── bootstrap.rs      BootstrapRegistry — tracks the custom two-phase bootstrap:
-│                       Phase 1 (first POST /bs): server waits 3 s then sends CON
-│                         GET /0/0 with TC=0x0c (radio: no encryption) to read the
-│                         device's X.509 public key (SenML+CBOR, ~457 bytes).
-│                         The /bs CON is not ACKed; the device retransmits it.
-│                       Phase 2 (second POST /bs, after cert cached): server ACKs
-│                         and proceeds with bootstrap write (network key via ECDH).
-│                     Maintains cert_cache so the key survives repeated /bs bursts.
+├── bootstrap.rs      BootstrapRegistry — drives the two-phase bootstrap described
+│                     above. Generates the ephemeral P-256 keypair at startup,
+│                     caches device X.509 certificates across /bs retransmits,
+│                     performs ECDH key encapsulation for the network key, and
+│                     tracks per-token oneshot channels for the write sequence.
 │
 ├── error.rs          Unified Error enum (thiserror).
 │
+├── ipc.rs            Unix socket server on /tmp/lwm2mserver-command.ipc.
+│                     Handles newline-framed JSON array requests from local
+│                     processes; currently supports "read devices".
+│
 ├── coap/
-│   ├── mod.rs        UDP socket bind helper (socket2, SO_BINDTODEVICE); CoAP
-│   │                 content-format constants.
+│   ├── mod.rs        UDP socket bind helper (socket2, SO_BINDTODEVICE).
 │   ├── server.rs     Inbound CoAP task. recv_from loop on [::]:20017.
 │   │                 Handles:
-│   │                   POST /bs          — bootstrap request → GET /0/0 (phase 1)
-│   │                                       or ACK (phase 2, cert cached)
-│   │                   POST /rd          — device registration → 2.01 Created
-│   │                   POST /rd/<id>     — heartbeat → 2.04 Changed + drain ops
-│   │                   ACK              — CoAP response → bootstrap complete or
-│   │                                       fires op oneshot
-│   │                   RST              — fires op oneshot with CoapError
+│   │                   POST /bs          — bootstrap phase 1 or phase 2 write sequence
+│   │                   POST /rd          — device registration → 2.01 Created (TC=0x1c)
+│   │                   POST /rd/<id>     — heartbeat → 2.04 Changed + drain ops (TC=0x1c)
+│   │                   POST /dp          — data push → 2.04 Changed (TC=0x1c) + log SenML
+│   │                   ACK              — bootstrap write-step or op oneshot completion
+│   │                   RST              — op oneshot fires with CoapError
 │   └── client.rs     Outbound CoAP task. Receives DispatchRequest from channel,
-│                     builds CON requests, sends, retransmits up to 4× with
-│                     exponential backoff (2 s initial, RFC 7252 defaults).
+│                     builds CON requests, retransmits up to 4× with exponential
+│                     backoff (2 s initial, RFC 7252 defaults).
 │
-└── mqtt/
-    ├── mod.rs        build_client() — constructs rumqttc AsyncClient + EventLoop
-    │                 with the appropriate transport (rustls TLS or plain TCP).
-    ├── subscriber.rs Drives the rumqttc EventLoop. Parses JSON command payloads,
-    │                 calls registry.enqueue_op(), spawns a future per op that
-    │                 waits on the oneshot and publishes the result.
-    └── publisher.rs  Receives MqttResponse from channel, serializes to JSON,
-                      publishes to the per-request response topic.
-
-housekeeping.rs       60-second interval task. Expires stale device registrations,
-                      times out in-flight ops (firing oneshots with Timeout), and
-                      expires stale bootstrap sessions (device sent /bs but never
-                      answered GET /0/0).
+└── housekeeping.rs   60-second interval task. Expires stale device registrations,
+                      times out in-flight ops, and expires stale bootstrap sessions.
 ```
 
 ### Task topology
 
 ```
-                      ┌─────────────────────────────────────────┐
-UDP :20017 ───────────►│ coap_server_task                        │
-                      │   recv_from loop                        │
-                      │   registration / heartbeat / ACK        │──► coap_dispatch_tx
-                      └──────────────────┬──────────────────────┘
-                                         │ mqtt_out_tx (ACK results)
-                      ┌──────────────────▼──────────────────────┐
-                      │ coap_dispatch_task                       │
-                      │   send CON requests, retransmit loop    │◄── coap_dispatch_tx
-                      └─────────────────────────────────────────┘
+                      ┌──────────────────────────────────────┐
+UDP :20017 ───────────►│ coap_server_task                     │
+                      │   recv_from loop                     │──► coap_dispatch_tx
+                      │   registration / heartbeat / ACK     │
+                      └──────────────────────────────────────┘
 
-                      ┌─────────────────────────────────────────┐
-AWS IoT / broker ────►│ mqtt_inbound_task (EventLoop poll)      │
-                      │   parse JSON → enqueue_op               │──► coap_dispatch_tx
-                      │   spawn per-op response future          │
-                      └─────────────────────────────────────────┘
+                      ┌──────────────────────────────────────┐
+                      │ coap_dispatch_task                    │◄── coap_dispatch_tx
+                      │   send CON requests, retransmit loop │
+                      └──────────────────────────────────────┘
 
-                      ┌─────────────────────────────────────────┐
-                      │ mqtt_outbound_task                       │◄── mqtt_out_tx
-                      │   serialize JSON → publish              │
-                      └─────────────────────────────────────────┘
+                      ┌──────────────────────────────────────┐
+/tmp/…-command.ipc ──►│ ipc_task                             │
+                      │   read devices / future commands     │
+                      └──────────────────────────────────────┘
 
-                      ┌─────────────────────────────────────────┐
-                      │ housekeeping_task (60 s interval)        │
-                      │   expire registrations, timeout ops     │
-                      └─────────────────────────────────────────┘
+                      ┌──────────────────────────────────────┐
+                      │ housekeeping_task (60 s interval)     │
+                      │   expire registrations, timeout ops  │
+                      └──────────────────────────────────────┘
 ```

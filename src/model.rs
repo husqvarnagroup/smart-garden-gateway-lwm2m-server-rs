@@ -4,14 +4,14 @@ use std::{
     time::Instant,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::oneshot;
 
 pub type DeviceId = u32;
 
 // ── Resource addressing ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResourcePath {
     pub object_id: u16,
     pub instance_id: u16,
@@ -28,6 +28,7 @@ impl ResourcePath {
 // ── LWM2M commands & results ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum LwM2mCommand {
     Read { path: ResourcePath },
     Write { path: ResourcePath, value: Vec<u8>, content_format: u16 },
@@ -105,48 +106,3 @@ impl Device {
     }
 }
 
-// ── MQTT command / response wire types ───────────────────────────────────────
-
-/// JSON payload received from AWS IoT Core on the command topic.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MqttCommandPayload {
-    pub correlation_id: String,
-    pub endpoint: String,
-    /// "read" | "write" | "execute"
-    pub operation: String,
-    pub path: ResourcePath,
-    /// Only present for write operations (base64-encoded or plain value).
-    #[serde(default)]
-    pub value: Option<serde_json::Value>,
-    /// CoAP content-format for write (default 0 = plain text).
-    #[serde(default)]
-    pub content_format: Option<u16>,
-    pub response_topic: String,
-}
-
-/// Parsed and typed command ready to enqueue.
-pub struct MqttCommand {
-    pub correlation_id: String,
-    pub endpoint: String,
-    pub command: LwM2mCommand,
-    pub response_topic: String,
-}
-
-/// Result ready to publish back to AWS IoT Core.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MqttResponsePayload {
-    pub correlation_id: String,
-    pub endpoint: String,
-    pub path: ResourcePath,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<ResourceValue>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<LwM2mError>,
-}
-
-pub struct MqttResponse {
-    pub response_topic: String,
-    pub payload: MqttResponsePayload,
-}

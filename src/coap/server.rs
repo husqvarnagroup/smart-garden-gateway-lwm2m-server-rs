@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use crate::{
     bootstrap::{self, BootstrapRegistry},
     error::Result,
-    model::{LwM2mError, MqttResponse, PendingOperation, ResourceValue},
+    model::{LwM2mError, PendingOperation, ResourceValue},
     registry::DeviceRegistry,
 };
 
@@ -32,7 +32,6 @@ pub async fn run(
     registry: DeviceRegistry,
     bootstrap_registry: BootstrapRegistry,
     coap_dispatch_tx: mpsc::Sender<DispatchRequest>,
-    mqtt_out_tx: mpsc::Sender<MqttResponse>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_PACKET];
@@ -53,7 +52,6 @@ pub async fn run(
                             &registry,
                             &bootstrap_registry,
                             &coap_dispatch_tx,
-                            &mqtt_out_tx,
                         )
                         .await
                         {
@@ -80,7 +78,6 @@ async fn handle_packet(
     registry: &DeviceRegistry,
     bootstrap_registry: &BootstrapRegistry,
     coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
-    mqtt_out_tx: &mpsc::Sender<MqttResponse>,
 ) -> Result<()> {
     let packet = Packet::from_bytes(data)
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
@@ -101,7 +98,7 @@ async fn handle_packet(
         }
         // Device acknowledging one of our downlink requests.
         MessageType::Acknowledgement => {
-            handle_ack(packet, addr, registry, bootstrap_registry, mqtt_out_tx).await?;
+            handle_ack(packet, addr, registry, bootstrap_registry).await?;
         }
         MessageType::Reset => {
             // Device rejected our message — treat as error for the in-flight op.
@@ -338,7 +335,6 @@ async fn handle_ack(
     addr: SocketAddr,
     registry: &DeviceRegistry,
     bootstrap_registry: &BootstrapRegistry,
-    mqtt_out_tx: &mpsc::Sender<MqttResponse>,
 ) -> Result<()> {
     let token = token_array(packet.get_token());
 
@@ -364,9 +360,7 @@ async fn handle_ack(
         return Ok(());
     };
 
-    let result = coap_response_to_result(&packet);
-    let _ = op.response_tx.send(result);
-    let _ = mqtt_out_tx; // used via subscriber wrapper
+    let _ = op.response_tx.send(coap_response_to_result(&packet));
     Ok(())
 }
 
