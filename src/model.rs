@@ -19,10 +19,6 @@ pub struct ResourcePath {
 }
 
 impl ResourcePath {
-    pub fn new(object_id: u16, instance_id: u16, resource_id: u16) -> Self {
-        Self { object_id, instance_id, resource_id }
-    }
-
     /// e.g. "3/0/0"
     pub fn as_uri_path(&self) -> String {
         format!("{}/{}/{}", self.object_id, self.instance_id, self.resource_id)
@@ -41,18 +37,13 @@ pub enum LwM2mCommand {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ResourceValue {
-    Opaque(Vec<u8>),
     Text(String),
-    Integer(i64),
-    Float(f64),
-    Boolean(bool),
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE", tag = "code")]
 pub enum LwM2mError {
     NotFound,
-    MethodNotAllowed,
     BadRequest,
     Timeout,
     /// CoAP error class/detail code pair (e.g. 4/4 = Not Found).

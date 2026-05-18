@@ -24,7 +24,6 @@ use tracing::{info, warn};
 /// State for one in-progress bootstrap exchange with a device.
 pub struct BootstrapSession {
     pub endpoint: String,
-    pub device_addr: SocketAddr,
     pub started_at: Instant,
     /// Raw SenML+CBOR payload from the device's GET /0/0 response.
     pub pubkey_payload: Option<Vec<u8>>,
@@ -110,7 +109,6 @@ impl BootstrapRegistry {
             token,
             BootstrapSession {
                 endpoint: endpoint.clone(),
-                device_addr,
                 started_at: Instant::now(),
                 pubkey_payload: None,
             },

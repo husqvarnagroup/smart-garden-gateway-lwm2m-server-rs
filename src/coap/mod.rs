@@ -39,11 +39,7 @@ pub async fn bind(addr: SocketAddr, interface: Option<&str>) -> Result<Arc<UdpSo
 
 /// CoAP content-format values used by LWM2M 1.0.
 pub mod content_format {
-    pub const TEXT_PLAIN: u16 = 0;
-    pub const LINK_FORMAT: u16 = 40;
     pub const SENML_CBOR: u16 = 112;
-    pub const TLV: u16 = 11542;
-    pub const JSON: u16 = 11543;
 }
 
 /// LWM2M registration path prefix.

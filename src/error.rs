@@ -17,9 +17,6 @@ pub enum Error {
     #[error("config: {0}")]
     Config(String),
 
-    #[error("device not found: {0}")]
-    DeviceNotFound(String),
-
     #[error("bootstrap: {0}")]
     Bootstrap(String),
 }

@@ -203,9 +203,4 @@ impl DeviceRegistry {
         Some(inner.by_id.get(id)?.addr)
     }
 
-    /// Check whether a device is currently registered (for immediate dispatch).
-    pub async fn is_registered(&self, endpoint: &str) -> bool {
-        let inner = self.inner.read().await;
-        inner.by_endpoint.contains_key(endpoint)
-    }
 }
