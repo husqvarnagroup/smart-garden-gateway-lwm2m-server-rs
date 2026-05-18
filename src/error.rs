@@ -19,6 +19,9 @@ pub enum Error {
 
     #[error("device not found: {0}")]
     DeviceNotFound(String),
+
+    #[error("bootstrap: {0}")]
+    Bootstrap(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

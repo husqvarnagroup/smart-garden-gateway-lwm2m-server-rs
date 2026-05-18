@@ -8,7 +8,15 @@ use std::{
     time::Instant,
 };
 
-use p256::{elliptic_curve::sec1::ToEncodedPoint, SecretKey};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes128Gcm, Nonce,
+};
+use p256::{
+    ecdh::diffie_hellman,
+    elliptic_curve::sec1::ToEncodedPoint,
+    PublicKey, SecretKey,
+};
 use rand_core::OsRng;
 use tokio::sync::{oneshot, Mutex};
 use tracing::{info, warn};
@@ -40,6 +48,8 @@ pub struct BootstrapRegistry {
     inner: Arc<Mutex<RegistryInner>>,
     /// Token IDs start at 0x8000_0000 to avoid collisions with regular op IDs (1…).
     token_counter: Arc<AtomicU32>,
+    /// Ephemeral server P-256 keypair — secret kept for ECDH during write phase.
+    server_secret_key: Arc<SecretKey>,
     /// Compressed P-256 public key (33 bytes) of the ephemeral server keypair.
     server_pubkey_bytes: Arc<Vec<u8>>,
     /// Raw network key loaded from --lb-key-file.
@@ -75,6 +85,7 @@ impl BootstrapRegistry {
                 write_acks: HashMap::new(),
             })),
             token_counter: Arc::new(AtomicU32::new(token_start)),
+            server_secret_key: Arc::new(secret),
             server_pubkey_bytes: Arc::new(pubkey_bytes),
             network_key: Arc::new(network_key),
             server_uri: server_uri.map(Arc::new),
@@ -173,6 +184,11 @@ impl BootstrapRegistry {
         self.inner.lock().await.write_acks.remove(token);
     }
 
+    /// Ephemeral server P-256 secret key, needed for ECDH during write phase.
+    pub fn server_secret_key(&self) -> Arc<SecretKey> {
+        Arc::clone(&self.server_secret_key)
+    }
+
     /// Compressed P-256 public key of the ephemeral server keypair (33 bytes).
     pub fn server_pubkey_bytes(&self) -> &[u8] {
         &self.server_pubkey_bytes
@@ -213,6 +229,93 @@ impl BootstrapRegistry {
         inner.mid_counter = inner.mid_counter.wrapping_add(1);
         (token, mid)
     }
+}
+
+// ── Bootstrap crypto ──────────────────────────────────────────────────────────
+
+/// Extract the device's raw P-256 public key bytes from a SenML+CBOR GET /0/0 payload.
+///
+/// Looks for a record with SenML label `n="3"` (LWM2M Security Object resource 3 =
+/// "Public Key or Identity") and returns its `vd` (bytes) field.
+pub fn parse_device_pubkey(payload: &[u8]) -> crate::error::Result<Vec<u8>> {
+    use ciborium::value::Value as Cbor;
+
+    let top: Cbor = ciborium::from_reader(payload)
+        .map_err(|e| crate::error::Error::Bootstrap(format!("CBOR decode: {e}")))?;
+    let Cbor::Array(records) = top else {
+        return Err(crate::error::Error::Bootstrap("expected CBOR array".into()));
+    };
+
+    for record in &records {
+        let Cbor::Map(fields) = record else { continue };
+        let mut name: Option<&str> = None;
+        let mut vd: Option<&[u8]> = None;
+        for (k, v) in fields {
+            match (k, v) {
+                (Cbor::Integer(i), Cbor::Text(s)) if i128::from(*i) == 0 => {
+                    name = Some(s.as_str());
+                }
+                (Cbor::Integer(i), Cbor::Bytes(b)) if i128::from(*i) == 8 => {
+                    vd = Some(b.as_slice());
+                }
+                _ => {}
+            }
+        }
+        if name == Some("3") {
+            return vd
+                .map(|b| b.to_vec())
+                .ok_or_else(|| crate::error::Error::Bootstrap("resource 3 has no bytes value".into()));
+        }
+    }
+    Err(crate::error::Error::Bootstrap(
+        "device public key (resource /0/0/3) not found in GET /0/0 payload".into(),
+    ))
+}
+
+fn parse_p256_pubkey(bytes: &[u8]) -> crate::error::Result<PublicKey> {
+    use p256::pkcs8::DecodePublicKey;
+    use x509_cert::der::{Decode, Encode};
+
+    let cert = x509_cert::Certificate::from_der(bytes)
+        .map_err(|e| crate::error::Error::Bootstrap(format!("X.509 decode: {e}")))?;
+    let spki_der = cert
+        .tbs_certificate
+        .subject_public_key_info
+        .to_der()
+        .map_err(|e| crate::error::Error::Bootstrap(format!("SPKI encode: {e}")))?;
+    PublicKey::from_public_key_der(&spki_der)
+        .map_err(|e| crate::error::Error::Bootstrap(format!("pubkey decode: {e}")))
+}
+
+/// Encrypt `network_key` for the device using ECIES:
+///   shared = ECDH(server_private, device_public)
+///   aes_key = shared_x[..16]
+///   output  = AES-128-GCM(key=aes_key, nonce=0, plaintext=network_key)
+///           = ciphertext(16 B) ‖ tag(16 B) = 32 bytes total
+///
+/// The device decrypts by running the same ECDH with its own private key and the
+/// server public key written to /0/1/4.
+pub fn encrypt_network_key(
+    server_secret: &SecretKey,
+    device_pubkey_bytes: &[u8],
+    network_key: &[u8],
+) -> crate::error::Result<Vec<u8>> {
+    let device_pubkey = parse_p256_pubkey(device_pubkey_bytes)?;
+
+    let shared = diffie_hellman(
+        server_secret.to_nonzero_scalar(),
+        device_pubkey.as_affine(),
+    );
+    let shared_x = shared.raw_secret_bytes(); // 32-byte X coordinate
+
+    // 16 bytes always valid for AES-128; unwrap is safe.
+    let cipher = Aes128Gcm::new_from_slice(&shared_x[..16])
+        .expect("16-byte AES-128 key");
+    let nonce = Nonce::default(); // 12 zero bytes — safe for single-use ephemeral keys
+
+    cipher
+        .encrypt(&nonce, network_key)
+        .map_err(|e| crate::error::Error::Bootstrap(format!("AES-GCM encrypt: {e}")))
 }
 
 // ── CBOR encoding ─────────────────────────────────────────────────────────────

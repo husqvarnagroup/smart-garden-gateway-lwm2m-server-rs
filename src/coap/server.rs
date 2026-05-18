@@ -17,6 +17,11 @@ use crate::{
 use super::{content_format::SENML_CBOR, RD_PATH};
 
 const BS_PATH: &str = "bs";
+const DP_PATH: &str = "dp";
+/// IPv6 Traffic Class used for all post-bootstrap server traffic.
+/// Tells the radio module to apply MAC-layer encryption.
+#[cfg(target_os = "linux")]
+const TC_ENCRYPTED: u32 = 0x1c;
 const MAX_PACKET: usize = 1500;
 /// RFC 7252 retransmit defaults: up to 4 re-sends, 2 s initial backoff.
 const MAX_RETRANSMIT: u8 = 4;
@@ -137,6 +142,10 @@ async fn handle_post(
         [p, _id] if *p == RD_PATH => {
             handle_update(packet, addr, socket, registry, coap_dispatch_tx).await?;
         }
+        // POST /dp  — device data push (SenML+CBOR state report after registration)
+        [p] if *p == DP_PATH => {
+            handle_dp(packet, addr, socket).await?;
+        }
         _ => {
             warn!(%addr, path, "POST to unknown path");
             send_response(socket, addr, &packet, Status::NotFound, None).await?;
@@ -236,6 +245,35 @@ async fn send_bootstrap_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAdd
     Ok(())
 }
 
+/// Send a post-bootstrap CoAP packet with IPv6 Traffic Class 0x1c.
+/// TC=0x1c tells the radio module to apply MAC-layer encryption,
+/// required for all traffic after the network key has been provisioned.
+async fn send_encrypted_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAddr) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use socket2::SockRef;
+        SockRef::from(socket).set_tclass_v6(TC_ENCRYPTED)?;
+    }
+    socket.send_to(bytes, addr).await?;
+    #[cfg(target_os = "linux")]
+    {
+        use socket2::SockRef;
+        SockRef::from(socket).set_tclass_v6(0)?;
+    }
+    Ok(())
+}
+
+async fn send_encrypted_response(
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    request: &Packet,
+    status: Status,
+    payload: Option<Vec<u8>>,
+) -> Result<()> {
+    let bytes = make_response_bytes(request, status, payload)?;
+    send_encrypted_packet(socket, &bytes, addr).await
+}
+
 async fn handle_registration(
     packet: Packet,
     addr: SocketAddr,
@@ -253,7 +291,7 @@ async fn handle_registration(
 
     if endpoint.is_empty() {
         warn!(%addr, "registration missing ep parameter");
-        send_response(socket, addr, &packet, Status::BadRequest, None).await?;
+        send_encrypted_response(socket, addr, &packet, Status::BadRequest, None).await?;
         return Ok(());
     }
 
@@ -271,7 +309,7 @@ async fn handle_registration(
     let bytes = response
         .to_bytes()
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
-    socket.send_to(&bytes, addr).await?;
+    send_encrypted_packet(socket, &bytes, addr).await?;
 
     info!(%endpoint, id, %addr, "device registered");
     Ok(())
@@ -284,7 +322,7 @@ async fn handle_update(
     registry: &DeviceRegistry,
     coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
 ) -> Result<()> {
-    send_response(socket, addr, &packet, Status::Changed, None).await?;
+    send_encrypted_response(socket, addr, &packet, Status::Changed, None).await?;
 
     // Drain pending ops and hand them to the dispatch task.
     let ops = registry.drain_pending(addr).await;
@@ -332,6 +370,93 @@ async fn handle_ack(
     Ok(())
 }
 
+// ── Device data push (/dp) ───────────────────────────────────────────────────
+
+async fn handle_dp(
+    packet: Packet,
+    addr: SocketAddr,
+    socket: &Arc<UdpSocket>,
+) -> Result<()> {
+    send_encrypted_response(socket, addr, &packet, Status::Changed, None).await?;
+    if !packet.payload.is_empty() {
+        log_senml_cbor(addr, &packet.payload);
+    }
+    Ok(())
+}
+
+/// Decode a SenML+CBOR payload and emit one `info!` line per record.
+///
+/// SenML is a CBOR array of maps. Integer keys are the standard labels:
+///   -2=bn (base name), 0=n (name), 2=v (number), 3=vs (string),
+///   4=vb (bool), 8=vd (bytes).
+fn log_senml_cbor(addr: SocketAddr, data: &[u8]) {
+    use ciborium::value::Value as Cbor;
+
+    let top: Cbor = match ciborium::from_reader(data) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(%addr, bytes = data.len(), "dp: CBOR decode failed: {e}");
+            return;
+        }
+    };
+
+    let Cbor::Array(records) = top else {
+        warn!(%addr, "dp: expected CBOR array at top level");
+        return;
+    };
+
+    let mut base_name = String::new();
+
+    for record in &records {
+        let Cbor::Map(fields) = record else { continue };
+
+        let mut rel_name = String::new();
+        let mut value_str = String::new();
+
+        for (key, val) in fields {
+            let label = match key {
+                Cbor::Integer(i) => i128::from(*i),
+                _ => continue,
+            };
+            match label {
+                -2 => {
+                    if let Cbor::Text(s) = val {
+                        base_name = s.clone();
+                    }
+                }
+                0 => {
+                    if let Cbor::Text(s) = val {
+                        rel_name = s.clone();
+                    }
+                }
+                2 | 3 | 4 | 8 => {
+                    value_str = fmt_cbor(val);
+                }
+                _ => {}
+            }
+        }
+
+        let path = format!("{}{}", base_name, rel_name);
+        info!(%addr, %path, value = %value_str, "dp");
+    }
+}
+
+fn fmt_cbor(v: &ciborium::value::Value) -> String {
+    use ciborium::value::Value as Cbor;
+    match v {
+        Cbor::Integer(i) => format!("{}", i128::from(*i)),
+        Cbor::Float(f) => format!("{f}"),
+        Cbor::Text(s) => s.clone(),
+        Cbor::Bool(b) => b.to_string(),
+        Cbor::Bytes(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
+        Cbor::Null => "null".into(),
+        Cbor::Array(a) => format!("[{} items]", a.len()),
+        Cbor::Map(m) => format!("{{{} fields}}", m.len()),
+        Cbor::Tag(_, inner) => fmt_cbor(inner),
+        _ => "?".into(),
+    }
+}
+
 // ── Bootstrap write phase ─────────────────────────────────────────────────────
 
 /// Execute the full bootstrap write sequence after ACKing the second POST /bs:
@@ -348,6 +473,7 @@ async fn bootstrap_write_phase(
 
     let server_pubkey = registry.server_pubkey_bytes().to_vec();
     let network_key = registry.network_key().to_vec();
+    let server_secret = registry.server_secret_key();
 
     // Step 1 — DELETE /1 (clear existing Server Object instances)
     {
@@ -374,10 +500,19 @@ async fn bootstrap_write_phase(
         info!(%endpoint, "bootstrap: DELETE /0 ACKed");
     }
 
-    // Step 4 — PUT /0/1 (LWM2M Security Object: URI, server pubkey, network key)
+    // Step 4 — PUT /0/1 (LWM2M Security Object: URI, server pubkey, encrypted network key)
     {
+        let device_pubkey_payload = registry
+            .get_cert(&endpoint)
+            .await
+            .ok_or_else(|| crate::error::Error::Bootstrap("device pubkey not in cache".into()))?;
+        let device_pubkey_bytes = bootstrap::parse_device_pubkey(&device_pubkey_payload)?;
+        let encrypted_key =
+            bootstrap::encrypt_network_key(&server_secret, &device_pubkey_bytes, &network_key)?;
+
         let (token, mid) = registry.alloc_token_mid().await;
-        let payload = bootstrap::encode_security_object(&server_uri, &server_pubkey, &network_key);
+        let payload =
+            bootstrap::encode_security_object(&server_uri, &server_pubkey, &encrypted_key);
         let pkt = build_put(mid, &token[..4], &["0", "1"], SENML_CBOR, payload)?;
         send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
         info!(%endpoint, "bootstrap: PUT /0/1 ACKed");
