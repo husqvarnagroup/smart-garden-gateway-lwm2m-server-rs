@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes          = "1"
 tokio-util     = { version = "0.7", features = ["rt"] }
 anyhow         = "1"
+clap           = { version = "4", features = ["derive"] }
 socket2        = { version = "0.5", features = ["all"] }
 p256           = { version = "0.13", features = ["ecdh", "pkcs8"] }
 x509-cert      = { version = "0.2", default-features = false }

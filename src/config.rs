@@ -1,5 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+use clap::Parser;
+
 use crate::error::{Error, Result};
 
 /// How the service authenticates to the MQTT broker.
@@ -16,52 +18,60 @@ pub enum MqttAuth {
     Anonymous,
 }
 
-/// Runtime configuration. All fields can be set via environment variables.
+#[derive(Parser)]
+#[command(about = "LWM2M/CoAP gateway with bootstrap support")]
+struct Cli {
+    /// Network interface for CoAP traffic (e.g. ppp0)
+    interface: String,
+
+    /// Bind the CoAP socket to the interface via SO_BINDTODEVICE
+    #[arg(long)]
+    bind_to_device: bool,
+
+    /// CoAP URI of this server advertised to devices during bootstrap
+    #[arg(long, default_value = "coap://[fc00::6:100:0:0]")]
+    server_uri: String,
+
+    /// UDP port to listen on
+    #[arg(long, default_value_t = 20017)]
+    port: u16,
+
+    /// JSON file containing the network key (hex field "network_key")
+    #[arg(long, default_value = "/var/lib/lemonbeatd/Network_management/Network_key.json")]
+    lb_key_file: PathBuf,
+}
+
+/// Runtime configuration.
 pub struct Config {
-    /// UDP bind address for the CoAP/LWM2M server (default: [::]:20017).
+    /// UDP bind address derived from --port (always [::]:port).
     pub coap_bind_addr: SocketAddr,
 
-    /// MQTT broker hostname or IP.
-    pub mqtt_host: String,
-    /// MQTT port. Defaults to 8883 for TLS, 1883 for plain TCP.
-    pub mqtt_port: u16,
-    /// MQTT client ID (should match the AWS IoT Thing name when using TLS).
-    pub mqtt_client_id: String,
-
-    /// Authentication mode, derived from which env vars are present.
-    pub mqtt_auth: MqttAuth,
-
-    /// MQTT topic prefix. Commands arrive on `{prefix}/cmd/{endpoint}`,
-    /// responses are published to `{prefix}/resp/{endpoint}/{correlation_id}`.
-    pub mqtt_topic_prefix: String,
-
-    /// How long (seconds) to keep a device registration alive after the
-    /// declared lifetime expires before removing it from the registry.
-    pub registration_grace_secs: u32,
-
-    /// Network interface to bind the CoAP socket to (SO_BINDTODEVICE).
-    /// Set to "ppp0" when the radio is on a PPP link to ensure packets leave
-    /// via the correct interface with the right source address.
+    /// Interface to bind the socket to via SO_BINDTODEVICE; set when --bind-to-device is given.
     pub coap_interface: Option<String>,
 
-    /// This server's CoAP URI advertised to devices during bootstrap
-    /// (e.g. "coap://[fc00::6:100:0:0]"). Written to device Object 1 in the
-    /// bootstrap write phase so devices know where to register afterwards.
-    pub server_uri: Option<String>,
+    /// Server CoAP URI written to devices during bootstrap (from --server-uri).
+    pub server_uri: String,
 
-    /// Raw network key loaded from --lb-key-file (hex field "network_key").
-    /// Written to LWM2M Security Object /0/1/5 during bootstrap write phase.
+    /// Raw network key bytes loaded from --lb-key-file.
     pub network_key: Vec<u8>,
+
+    // ── MQTT (configured via environment variables) ──────────────────────────
+    pub mqtt_host: String,
+    pub mqtt_port: u16,
+    pub mqtt_client_id: String,
+    pub mqtt_auth: MqttAuth,
+    pub mqtt_topic_prefix: String,
 }
 
 impl Config {
-    /// Derive configuration from environment variables and CLI arguments.
-    ///
-    /// Auth mode selection (first match wins):
-    ///   TLS_CERT_PATH set          → mutual TLS (also requires TLS_KEY_PATH, TLS_CA_PATH)
-    ///   MQTT_USERNAME set          → plain TCP with username/password
-    ///   neither                    → plain TCP, anonymous
-    pub fn from_env() -> Result<Self> {
+    pub fn from_args() -> Result<Self> {
+        let cli = Cli::parse();
+
+        let coap_bind_addr =
+            SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, cli.port));
+        let coap_interface = cli.bind_to_device.then_some(cli.interface);
+        let network_key = load_network_key(&cli.lb_key_file)?;
+
         let mqtt_auth = if let Ok(cert) = std::env::var("TLS_CERT_PATH") {
             MqttAuth::Tls {
                 cert_path: PathBuf::from(cert),
@@ -77,49 +87,33 @@ impl Config {
             MqttAuth::Anonymous
         };
 
-        let default_port = match &mqtt_auth {
+        let default_mqtt_port = match &mqtt_auth {
             MqttAuth::Tls { .. } => "8883",
             _ => "1883",
         };
 
-        let network_key = load_network_key()?;
-
         Ok(Config {
-            coap_bind_addr: env_parse("COAP_BIND_ADDR", "[::]:20017")?,
+            coap_bind_addr,
+            coap_interface,
+            server_uri: cli.server_uri,
+            network_key,
             mqtt_host: env_require("MQTT_HOST")?,
-            mqtt_port: env_parse("MQTT_PORT", default_port)?,
+            mqtt_port: env_parse("MQTT_PORT", default_mqtt_port)?,
             mqtt_client_id: env_require("MQTT_CLIENT_ID")?,
             mqtt_auth,
             mqtt_topic_prefix: env_default("MQTT_TOPIC_PREFIX", "lwm2m"),
-            registration_grace_secs: env_parse("REGISTRATION_GRACE_SECS", "30")?,
-            coap_interface: std::env::var("COAP_INTERFACE").ok(),
-            server_uri: std::env::var("SERVER_URI").ok(),
-            network_key,
         })
     }
 }
 
-/// Parse `--lb-key-file <path>` from argv, read the JSON file, decode the
-/// hex value under "network_key".
-fn load_network_key() -> Result<Vec<u8>> {
-    let args: Vec<String> = std::env::args().collect();
-    let path = args
-        .windows(2)
-        .find(|w| w[0] == "--lb-key-file")
-        .map(|w| w[1].clone())
-        .ok_or_else(|| Error::Config("--lb-key-file <path> is required".into()))?;
-
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| Error::Config(format!("cannot read {path}: {e}")))?;
-
+fn load_network_key(path: &PathBuf) -> Result<Vec<u8>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display())))?;
     let json: serde_json::Value = serde_json::from_str(&content)?;
-
     let hex_str = json["network_key"]
         .as_str()
         .ok_or_else(|| Error::Config("\"network_key\" missing or not a string in key file".into()))?;
-
-    decode_hex(hex_str)
-        .map_err(|e| Error::Config(format!("invalid hex in network_key: {e}")))
+    decode_hex(hex_str).map_err(|e| Error::Config(format!("invalid hex in network_key: {e}")))
 }
 
 fn decode_hex(s: &str) -> std::result::Result<Vec<u8>, String> {
