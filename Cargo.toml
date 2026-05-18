@@ -3,6 +3,13 @@ name = "lwm2m-gateway"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "lwm2m_gateway"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile = "3"
+
 [dependencies]
 tokio          = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "macros", "signal", "io-util"] }
 coap-lite      = "0.11"

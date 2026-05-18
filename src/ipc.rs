@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixListener,
@@ -7,17 +9,17 @@ use tracing::{info, warn};
 
 use crate::error::Result;
 
-const SOCKET_PATH: &str = "/tmp/lwm2mserver-command.ipc";
+pub const DEFAULT_SOCKET_PATH: &str = "/tmp/lwm2mserver-command.ipc";
 
-pub async fn run(cancel: CancellationToken) -> Result<()> {
-    let _ = std::fs::remove_file(SOCKET_PATH);
-    let listener = UnixListener::bind(SOCKET_PATH)?;
-    info!(path = SOCKET_PATH, "IPC command socket listening");
+pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path)?;
+    info!(path = %path.display(), "IPC command socket listening");
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                let _ = std::fs::remove_file(SOCKET_PATH);
+                let _ = std::fs::remove_file(&path);
                 info!("IPC server shutting down");
                 return Ok(());
             }

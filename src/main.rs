@@ -1,20 +1,16 @@
-mod bootstrap;
-mod coap;
-mod config;
-mod error;
-mod housekeeping;
-mod ipc;
-mod model;
-mod registry;
+use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{
+use lwm2m_gateway::{
     bootstrap::BootstrapRegistry,
+    coap,
     coap::server::DispatchRequest,
     config::Config,
+    housekeeping,
+    ipc,
     registry::DeviceRegistry,
 };
 
@@ -72,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("housekeeping: {e}"))? }
 
-        r = ipc::run(cancel.clone()) => {
+        r = ipc::run(PathBuf::from(ipc::DEFAULT_SOCKET_PATH), cancel.clone()) => {
             r.map_err(|e| anyhow::anyhow!("ipc: {e}"))?
         }
     }
