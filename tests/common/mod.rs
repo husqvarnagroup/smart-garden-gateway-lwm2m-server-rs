@@ -11,6 +11,7 @@ use lwm2m_gateway::{
     event::{self, EventSender},
     housekeeping,
     ipc,
+    ipso::IpsoModel,
     registry::DeviceRegistry,
 };
 
@@ -57,6 +58,7 @@ impl TestGateway {
             bootstrap_registry.clone(),
             dispatch_tx,
             event_sender.clone(),
+            Arc::new(IpsoModel::default()),
             cancel.clone(),
         ));
         tokio::spawn(coap::client::run(

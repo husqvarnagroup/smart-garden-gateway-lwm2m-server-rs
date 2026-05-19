@@ -44,3 +44,12 @@ pub mod content_format {
 
 /// LWM2M registration path prefix.
 pub const RD_PATH: &str = "rd";
+
+/// Extract the bare SGTIN from a CoAP `ep` parameter that may carry a full URN.
+///
+/// `urn:dev:sg:3034F8319C00754000000097` → `3034F8319C00754000000097`
+/// `sgtin:3034F8319C00754000000097`      → `3034F8319C00754000000097`
+/// `3034F8319C00754000000097`            → `3034F8319C00754000000097`
+pub fn sgtin_from_ep(ep: &str) -> &str {
+    ep.rfind(':').map(|i| &ep[i + 1..]).unwrap_or(ep)
+}

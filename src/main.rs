@@ -4,6 +4,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use std::sync::Arc;
+
 use lwm2m_gateway::{
     bootstrap::BootstrapRegistry,
     coap,
@@ -12,6 +14,7 @@ use lwm2m_gateway::{
     event::{self, EventSender},
     housekeeping,
     ipc,
+    ipso::IpsoModel,
     registry::DeviceRegistry,
 };
 
@@ -25,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Config::from_args().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ipso = Arc::new(IpsoModel::load_dirs(&cfg.ipso_directories));
     let registry = DeviceRegistry::new();
     let bootstrap_registry = BootstrapRegistry::new(cfg.network_key.clone(), Some(cfg.server_uri.clone()));
     let bootstrap_registry_hk = bootstrap_registry.clone();
@@ -56,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
             bootstrap_registry,
             coap_dispatch_tx,
             event_sender.clone(),
+            ipso,
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap server: {e}"))? }
 

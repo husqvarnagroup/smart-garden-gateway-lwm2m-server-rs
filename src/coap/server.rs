@@ -11,6 +11,7 @@ use crate::{
     bootstrap::{self, BootstrapRegistry},
     error::Result,
     event::EventSender,
+    ipso::IpsoModel,
     model::{LwM2mError, PendingOperation, ResourceValue},
     registry::DeviceRegistry,
 };
@@ -34,6 +35,7 @@ pub async fn run(
     bootstrap_registry: BootstrapRegistry,
     coap_dispatch_tx: mpsc::Sender<DispatchRequest>,
     event_sender: EventSender,
+    ipso: Arc<IpsoModel>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_PACKET];
@@ -55,6 +57,7 @@ pub async fn run(
                             &bootstrap_registry,
                             &coap_dispatch_tx,
                             &event_sender,
+                            &ipso,
                         )
                         .await
                         {
@@ -82,6 +85,7 @@ async fn handle_packet(
     bootstrap_registry: &BootstrapRegistry,
     coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
     event_sender: &EventSender,
+    ipso: &Arc<IpsoModel>,
 ) -> Result<()> {
     let packet = Packet::from_bytes(data)
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
@@ -93,7 +97,7 @@ async fn handle_packet(
         MessageType::Confirmable | MessageType::NonConfirmable => {
             match packet.header.code {
                 MessageClass::Request(Method::Post) => {
-                    handle_post(packet, addr, socket, registry, bootstrap_registry, coap_dispatch_tx, event_sender).await?;
+                    handle_post(packet, addr, socket, registry, bootstrap_registry, coap_dispatch_tx, event_sender, ipso).await?;
                 }
                 other => {
                     warn!(%addr, ?other, "unexpected CoAP request method");
@@ -127,6 +131,7 @@ async fn handle_post(
     bootstrap_registry: &BootstrapRegistry,
     coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
     event_sender: &EventSender,
+    ipso: &Arc<IpsoModel>,
 ) -> Result<()> {
     let path = uri_path(&packet);
     let path_parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
@@ -146,7 +151,7 @@ async fn handle_post(
         }
         // POST /dp  — device data push (SenML+CBOR state report after registration)
         [p] if *p == DP_PATH => {
-            handle_dp(packet, addr, socket).await?;
+            handle_dp(packet, addr, socket, registry, event_sender, ipso).await?;
         }
         _ => {
             warn!(%addr, path, "POST to unknown path");
@@ -166,7 +171,8 @@ async fn handle_bootstrap(
     let query = uri_query(&packet);
     let params = parse_query(&query);
 
-    let endpoint = params.get("ep").cloned().unwrap_or_default();
+    let ep_raw = params.get("ep").map(String::as_str).unwrap_or("");
+    let endpoint = super::sgtin_from_ep(ep_raw).to_owned();
     if endpoint.is_empty() {
         warn!(%addr, "bootstrap request missing ep parameter");
         send_response(socket, addr, &packet, Status::BadRequest, None).await?;
@@ -299,7 +305,8 @@ async fn handle_registration(
     let query = uri_query(&packet);
     let params = parse_query(&query);
 
-    let endpoint = params.get("ep").cloned().unwrap_or_default();
+    let ep_raw = params.get("ep").map(String::as_str).unwrap_or("");
+    let endpoint = super::sgtin_from_ep(ep_raw).to_owned();
     let lifetime: u32 = params
         .get("lt")
         .and_then(|v| v.parse().ok())
@@ -311,11 +318,11 @@ async fn handle_registration(
         return Ok(());
     }
 
-    // Parse link-format body for registered objects.
+    // Parse link-format body for registered objects and their versions.
     let body = std::str::from_utf8(packet.payload.as_slice()).unwrap_or("");
-    let objects = parse_link_format(body);
+    let (objects, object_versions) = parse_link_format(body);
 
-    let id = registry.register(endpoint.clone(), addr, lifetime, objects).await;
+    let id = registry.register(endpoint.clone(), addr, lifetime, objects, object_versions).await;
 
     // 2.01 Created with Location-Path: rd / <id>
     let mut response = make_response(&packet, Status::Created);
@@ -427,84 +434,227 @@ async fn handle_dp(
     packet: Packet,
     addr: SocketAddr,
     socket: &Arc<UdpSocket>,
+    registry: &DeviceRegistry,
+    event_sender: &EventSender,
+    ipso: &IpsoModel,
 ) -> Result<()> {
     send_encrypted_response(socket, addr, &packet, Status::Changed, None).await?;
-    if !packet.payload.is_empty() {
-        log_senml_cbor(addr, &packet.payload);
+
+    if packet.payload.is_empty() {
+        return Ok(());
     }
+
+    let Some(endpoint) = registry.endpoint_by_addr(addr).await else {
+        warn!(%addr, "dp: unknown device, ignoring payload");
+        return Ok(());
+    };
+
+    let obj_versions = registry.object_versions_by_addr(addr).await.unwrap_or_default();
+
+    match build_device_payload(&packet.payload, ipso, &obj_versions) {
+        Some(payload) => {
+            info!(%addr, endpoint = %endpoint, "dp: emitting device data event");
+            event_sender.send_device_data(&endpoint, payload);
+        }
+        None => warn!(%addr, endpoint = %endpoint, "dp: no known objects in payload"),
+    }
+
     Ok(())
 }
 
-/// Decode a SenML+CBOR payload and emit one `info!` line per record.
-///
-/// SenML is a CBOR array of maps. Integer keys are the standard labels:
-///   -2=bn (base name), 0=n (name), 2=v (number), 3=vs (string),
-///   4=vb (bool), 8=vd (bytes).
-fn log_senml_cbor(addr: SocketAddr, data: &[u8]) {
+// ── SenML+CBOR → event payload ────────────────────────────────────────────────
+
+enum SenmlValue {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    Bytes(Vec<u8>),
+}
+
+/// Parse a SenML+CBOR payload and build the event `payload` object grouped by
+/// IPSO object name → instance id → resource name.  Returns `None` if the
+/// payload decodes but contains no objects known to the IPSO model.
+fn build_device_payload(
+    data: &[u8],
+    ipso: &IpsoModel,
+    obj_versions: &std::collections::HashMap<u32, String>,
+) -> Option<serde_json::Value> {
     use ciborium::value::Value as Cbor;
+    use std::collections::BTreeMap;
 
     let top: Cbor = match ciborium::from_reader(data) {
         Ok(v) => v,
         Err(e) => {
-            warn!(%addr, bytes = data.len(), "dp: CBOR decode failed: {e}");
-            return;
+            warn!(bytes = data.len(), "dp: CBOR decode failed: {e}");
+            return None;
         }
     };
 
     let Cbor::Array(records) = top else {
-        warn!(%addr, "dp: expected CBOR array at top level");
-        return;
+        warn!("dp: expected CBOR array at top level");
+        return None;
     };
 
+    let ts = crate::event::unix_ts();
     let mut base_name = String::new();
+
+    // obj_id → inst_id → res_id → (values, is_array)
+    // is_array = true when the SenML path included a resource-instance segment OR
+    // when the IPSO definition marks the resource as MultipleInstances.
+    let mut raw: BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, (Vec<SenmlValue>, bool)>>> = BTreeMap::new();
 
     for record in &records {
         let Cbor::Map(fields) = record else { continue };
 
         let mut rel_name = String::new();
-        let mut value_str = String::new();
+        let mut value: Option<SenmlValue> = None;
 
         for (key, val) in fields {
-            let label = match key {
-                Cbor::Integer(i) => i128::from(*i),
-                _ => continue,
-            };
-            match label {
+            let Cbor::Integer(i) = key else { continue };
+            match i128::from(*i) {
                 -2 => {
-                    if let Cbor::Text(s) = val {
-                        base_name = s.clone();
-                    }
+                    if let Cbor::Text(s) = val { base_name = s.clone(); }
                 }
                 0 => {
-                    if let Cbor::Text(s) = val {
-                        rel_name = s.clone();
-                    }
+                    if let Cbor::Text(s) = val { rel_name = s.clone(); }
                 }
-                2 | 3 | 4 | 8 => {
-                    value_str = fmt_cbor(val);
-                }
+                2 => match val {
+                    Cbor::Integer(i) => { value = Some(SenmlValue::Int(i128::from(*i) as i64)); }
+                    Cbor::Float(f)   => { value = Some(SenmlValue::Float(*f)); }
+                    _ => {}
+                },
+                3 => { if let Cbor::Text(s) = val { value = Some(SenmlValue::Str(s.clone())); } }
+                4 => { if let Cbor::Bool(b) = val { value = Some(SenmlValue::Bool(*b)); } }
+                8 => { if let Cbor::Bytes(b) = val { value = Some(SenmlValue::Bytes(b.clone())); } }
                 _ => {}
             }
         }
 
-        let path = format!("{}{}", base_name, rel_name);
-        info!(%addr, %path, value = %value_str, "dp");
+        let full_path = format!("{base_name}{rel_name}");
+        let Some(v) = value else { continue };
+        let Some((obj_id, inst_id, res_id, has_res_inst)) = parse_lwm2m_path(&full_path) else { continue };
+
+        let entry = raw.entry(obj_id).or_default()
+            .entry(inst_id).or_default()
+            .entry(res_id)
+            .or_insert_with(|| (Vec::new(), false));
+        entry.0.push(v);
+        entry.1 |= has_res_inst;
+    }
+
+    let mut payload = serde_json::Map::new();
+
+    for (obj_id, instances) in &raw {
+        let ver = obj_versions.get(obj_id).map(String::as_str);
+        let Some(obj_def) = ipso.get_versioned(*obj_id, ver) else { continue };
+
+        let mut obj_json = serde_json::Map::new();
+        obj_json.insert("_urn".into(), serde_json::Value::String(obj_def.urn.clone()));
+
+        for (inst_id, resources) in instances {
+            let mut inst_json = serde_json::Map::new();
+
+            for (res_id, (values, path_is_array)) in resources {
+                let (res_name, res_type, def_is_array) = match obj_def.resources.get(res_id) {
+                    Some(r) => (r.name.clone(), &r.resource_type, r.multiple_instances),
+                    None    => (res_id.to_string(), &crate::ipso::ResourceType::Integer, false),
+                };
+
+                // Use array encoding when the IPSO def or the SenML path signals multi-instance.
+                let is_array = *path_is_array || def_is_array;
+                let value_json = if !is_array && values.len() == 1 {
+                    encode_single_value(&values[0], res_type, ts)
+                } else {
+                    encode_array_value(values, res_type, ts)
+                };
+
+                inst_json.insert(res_name, value_json);
+            }
+
+            obj_json.insert(inst_id.to_string(), serde_json::Value::Object(inst_json));
+        }
+
+        payload.insert(obj_def.name.clone(), serde_json::Value::Object(obj_json));
+    }
+
+    if payload.is_empty() { None } else { Some(serde_json::Value::Object(payload)) }
+}
+
+/// Parse `/<obj>/<inst>/<res>[/<res_inst>]`.
+///
+/// Returns `(obj_id, inst_id, res_id, has_res_inst)` where `has_res_inst` is
+/// `true` when a fourth segment (resource-instance ID) is present — indicating
+/// that the resource is multi-instance and its value should be wrapped in an array.
+fn parse_lwm2m_path(path: &str) -> Option<(u32, u32, u32, bool)> {
+    let trimmed = path.trim_start_matches('/');
+    let mut parts = trimmed.splitn(5, '/');
+    let obj:  u32 = parts.next()?.parse().ok()?;
+    let inst: u32 = parts.next()?.parse().ok()?;
+    let res:  u32 = parts.next()?.parse().ok()?;
+    let has_res_inst = parts.next().map_or(false, |p| p.parse::<u32>().is_ok());
+    Some((obj, inst, res, has_res_inst))
+}
+
+fn encode_single_value(
+    v: &SenmlValue,
+    res_type: &crate::ipso::ResourceType,
+    ts: u64,
+) -> serde_json::Value {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use crate::ipso::ResourceType::*;
+    match (v, res_type) {
+        (SenmlValue::Int(i),   Time)    => serde_json::json!({"vt": *i, "ts": ts}),
+        (SenmlValue::Int(i),   _)       => serde_json::json!({"vi": *i, "ts": ts}),
+        (SenmlValue::Float(f), _)       => serde_json::json!({"vf": *f, "ts": ts}),
+        (SenmlValue::Str(s),   _)       => serde_json::json!({"vs": s,  "ts": ts}),
+        (SenmlValue::Bool(b),  _)       => serde_json::json!({"vb": *b, "ts": ts}),
+        (SenmlValue::Bytes(b), _)       => serde_json::json!({"vo": STANDARD.encode(b), "ts": ts}),
     }
 }
 
-fn fmt_cbor(v: &ciborium::value::Value) -> String {
-    use ciborium::value::Value as Cbor;
-    match v {
-        Cbor::Integer(i) => format!("{}", i128::from(*i)),
-        Cbor::Float(f) => format!("{f}"),
-        Cbor::Text(s) => s.clone(),
-        Cbor::Bool(b) => b.to_string(),
-        Cbor::Bytes(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
-        Cbor::Null => "null".into(),
-        Cbor::Array(a) => format!("[{} items]", a.len()),
-        Cbor::Map(m) => format!("{{{} fields}}", m.len()),
-        Cbor::Tag(_, inner) => fmt_cbor(inner),
-        _ => "?".into(),
+fn encode_array_value(
+    values: &[SenmlValue],
+    res_type: &crate::ipso::ResourceType,
+    ts: u64,
+) -> serde_json::Value {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use crate::ipso::ResourceType::*;
+    match res_type {
+        String => {
+            let arr: Vec<_> = values.iter()
+                .filter_map(|v| if let SenmlValue::Str(s) = v { Some(s.as_str()) } else { None })
+                .map(serde_json::Value::from).collect();
+            serde_json::json!({"as": arr, "ts": ts})
+        }
+        Boolean => {
+            let arr: Vec<_> = values.iter()
+                .filter_map(|v| if let SenmlValue::Bool(b) = v { Some(*b) } else { None })
+                .map(serde_json::Value::from).collect();
+            serde_json::json!({"ab": arr, "ts": ts})
+        }
+        Opaque => {
+            let arr: Vec<_> = values.iter()
+                .filter_map(|v| if let SenmlValue::Bytes(b) = v { Some(STANDARD.encode(b)) } else { None })
+                .map(serde_json::Value::from).collect();
+            serde_json::json!({"ao": arr, "ts": ts})
+        }
+        // Integer, Float, Time, UnsignedInteger, CoreLink → ai / af
+        _ => {
+            if values.iter().all(|v| matches!(v, SenmlValue::Int(_))) {
+                let arr: Vec<i64> = values.iter()
+                    .filter_map(|v| if let SenmlValue::Int(i) = v { Some(*i) } else { None })
+                    .collect();
+                serde_json::json!({"ai": arr, "ts": ts})
+            } else {
+                let arr: Vec<f64> = values.iter().filter_map(|v| match v {
+                    SenmlValue::Int(i)   => Some(*i as f64),
+                    SenmlValue::Float(f) => Some(*f),
+                    _                    => None,
+                }).collect();
+                serde_json::json!({"af": arr, "ts": ts})
+            }
+        }
     }
 }
 
@@ -730,15 +880,40 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-/// Parse LWM2M link-format: "</3/0>,</4/0>" → ["3/0", "4/0"]
-fn parse_link_format(body: &str) -> Vec<String> {
-    body.split(',')
-        .filter_map(|link| {
-            let link = link.trim();
-            let inner = link.strip_prefix('<')?.strip_suffix('>')?;
-            Some(inner.trim_start_matches('/').to_owned())
-        })
-        .collect()
+/// Parse LWM2M link-format into object paths and per-object version strings.
+///
+/// Input: `"</3/0>;ver=1.1,</4/0>;ver=1.2,</5/0>"`
+/// Returns: `(["3/0", "4/0", "5/0"], {3 → "1.1", 4 → "1.2"})`
+fn parse_link_format(body: &str) -> (Vec<String>, std::collections::HashMap<u32, String>) {
+    let mut objects = Vec::new();
+    let mut versions = std::collections::HashMap::new();
+
+    for link in body.split(',') {
+        let link = link.trim();
+        let Some(angle_end) = link.find('>') else { continue };
+        // Strip leading '<' and trailing '>'
+        let path = link[1..angle_end].trim_start_matches('/').to_owned();
+
+        // Parse semicolon-separated attributes after '>'
+        let attrs = &link[angle_end + 1..];
+        let ver = attrs
+            .split(';')
+            .filter_map(|attr| attr.strip_prefix("ver="))
+            .next()
+            .unwrap_or("");
+
+        if let Some(obj_id_str) = path.split('/').next() {
+            if let Ok(obj_id) = obj_id_str.parse::<u32>() {
+                if !ver.is_empty() {
+                    versions.insert(obj_id, ver.to_owned());
+                }
+            }
+        }
+
+        objects.push(path);
+    }
+
+    (objects, versions)
 }
 
 fn token_array(token: &[u8]) -> [u8; 8] {

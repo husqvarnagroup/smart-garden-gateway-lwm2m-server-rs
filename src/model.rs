@@ -77,6 +77,8 @@ pub struct Device {
     pub last_contact: Instant,
     /// Object links reported at registration, e.g. ["3/0", "4/0"].
     pub objects: Vec<String>,
+    /// Object versions from the link-format `ver` attribute, keyed by object id.
+    pub object_versions: HashMap<u32, String>,
     /// Operations waiting to be sent on next device contact.
     pub pending_ops: VecDeque<PendingOperation>,
     /// Operations sent but awaiting CoAP ACK, keyed by 8-byte token.
@@ -84,7 +86,14 @@ pub struct Device {
 }
 
 impl Device {
-    pub fn new(id: DeviceId, endpoint: String, addr: SocketAddr, lifetime: u32, objects: Vec<String>) -> Self {
+    pub fn new(
+        id: DeviceId,
+        endpoint: String,
+        addr: SocketAddr,
+        lifetime: u32,
+        objects: Vec<String>,
+        object_versions: HashMap<u32, String>,
+    ) -> Self {
         let now = Instant::now();
         Self {
             id,
@@ -94,6 +103,7 @@ impl Device {
             registered_at: now,
             last_contact: now,
             objects,
+            object_versions,
             pending_ops: VecDeque::new(),
             in_flight: HashMap::new(),
         }

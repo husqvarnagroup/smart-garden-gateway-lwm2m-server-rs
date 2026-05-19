@@ -56,6 +56,18 @@ impl EventSender {
         let _ = self.tx.send(format!("{msg}\n"));
     }
 
+    /// Emit a `device/<endpoint>` update event carrying the IPSO-translated /dp payload.
+    pub fn send_device_data(&self, endpoint: &str, payload: serde_json::Value) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let msg = serde_json::json!([{
+            "op": "update",
+            "entity": {"device": endpoint, "path": ""},
+            "payload": payload,
+            "metadata": {"source": "lwm2mserver", "sequence": seq}
+        }]);
+        let _ = self.tx.send(format!("{msg}\n"));
+    }
+
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<String> {
         self.tx.subscribe()
     }
@@ -100,7 +112,7 @@ async fn relay_to_client(stream: tokio::net::UnixStream, mut rx: broadcast::Rece
     }
 }
 
-fn unix_ts() -> u64 {
+pub(crate) fn unix_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

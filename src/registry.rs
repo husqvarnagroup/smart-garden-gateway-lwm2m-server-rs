@@ -41,6 +41,7 @@ impl DeviceRegistry {
         addr: SocketAddr,
         lifetime: u32,
         objects: Vec<String>,
+        object_versions: HashMap<u32, String>,
     ) -> DeviceId {
         let mut inner = self.inner.write().await;
 
@@ -55,6 +56,7 @@ impl DeviceRegistry {
             dev.addr = addr;
             dev.lifetime = lifetime;
             dev.objects = objects;
+            dev.object_versions = object_versions;
             let now = std::time::Instant::now();
             dev.registered_at = now;
             dev.last_contact = now;
@@ -65,7 +67,7 @@ impl DeviceRegistry {
         let id = inner.next_id;
         inner.next_id = inner.next_id.wrapping_add(1).max(1);
 
-        let dev = Device::new(id, endpoint.clone(), addr, lifetime, objects);
+        let dev = Device::new(id, endpoint.clone(), addr, lifetime, objects, object_versions);
         inner.by_id.insert(id, dev);
         inner.by_endpoint.insert(endpoint.clone(), id);
         inner.by_addr.insert(addr, id);
@@ -142,6 +144,20 @@ impl DeviceRegistry {
             }
         }
         removed
+    }
+
+    /// Return the endpoint name registered for this address, if any.
+    pub async fn endpoint_by_addr(&self, addr: SocketAddr) -> Option<String> {
+        let inner = self.inner.read().await;
+        let id = inner.by_addr.get(&addr)?;
+        Some(inner.by_id[id].endpoint.clone())
+    }
+
+    /// Return the object versions registered for the device at this address.
+    pub async fn object_versions_by_addr(&self, addr: SocketAddr) -> Option<HashMap<u32, String>> {
+        let inner = self.inner.read().await;
+        let id = inner.by_addr.get(&addr)?;
+        Some(inner.by_id[id].object_versions.clone())
     }
 
     /// Timeout in-flight operations that have exceeded `max_secs`.

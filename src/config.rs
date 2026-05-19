@@ -26,6 +26,10 @@ struct Cli {
     /// JSON file containing the network key (hex field "network_key")
     #[arg(long, default_value = "/var/lib/lemonbeatd/Network_management/Network_key.json")]
     lb_key_file: PathBuf,
+
+    /// Directories containing IPSO object definition XML files
+    #[arg(long, num_args = 0.., value_name = "DIR")]
+    ipso_directories: Vec<PathBuf>,
 }
 
 pub struct Config {
@@ -40,6 +44,9 @@ pub struct Config {
 
     /// Raw network key bytes loaded from --lb-key-file.
     pub network_key: Vec<u8>,
+
+    /// Directories to scan for IPSO object definition XML files (from --ipso-directories).
+    pub ipso_directories: Vec<std::path::PathBuf>,
 }
 
 impl Config {
@@ -56,6 +63,7 @@ impl Config {
             coap_interface,
             server_uri: cli.server_uri,
             network_key,
+            ipso_directories: cli.ipso_directories,
         })
     }
 }

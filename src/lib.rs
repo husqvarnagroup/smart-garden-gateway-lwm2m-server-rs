@@ -5,5 +5,6 @@ pub mod error;
 pub mod event;
 pub mod housekeeping;
 pub mod ipc;
+pub mod ipso;
 pub mod model;
 pub mod registry;
