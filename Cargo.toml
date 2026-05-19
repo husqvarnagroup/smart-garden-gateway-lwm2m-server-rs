@@ -25,7 +25,7 @@ clap           = { version = "4", features = ["derive"] }
 socket2        = { version = "0.5", features = ["all"] }
 p256           = { version = "0.13", features = ["ecdh", "pkcs8"] }
 x509-cert      = { version = "0.2", default-features = false }
-aes-gcm        = "0.10"
+aes            = "0.8"
 rand_core      = { version = "0.6", features = ["getrandom"] }
 ciborium       = "0.2"
 

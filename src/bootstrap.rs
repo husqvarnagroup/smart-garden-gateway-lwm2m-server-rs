@@ -8,9 +8,9 @@ use std::{
     time::Instant,
 };
 
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes128Gcm, Nonce,
+use aes::{
+    cipher::{BlockEncrypt, KeyInit},
+    Aes128,
 };
 use p256::{
     ecdh::diffie_hellman,
@@ -285,35 +285,60 @@ fn parse_p256_pubkey(bytes: &[u8]) -> crate::error::Result<PublicKey> {
         .map_err(|e| crate::error::Error::Bootstrap(format!("pubkey decode: {e}")))
 }
 
-/// Encrypt `network_key` for the device using ECIES:
-///   shared = ECDH(server_private, device_public)
-///   aes_key = shared_x[..16]
-///   output  = AES-128-GCM(key=aes_key, nonce=0, plaintext=network_key)
-///           = ciphertext(16 B) ‖ tag(16 B) = 32 bytes total
+/// Encrypt `network_key` for the device:
 ///
-/// The device decrypts by running the same ECDH with its own private key and the
-/// server public key written to /0/1/4.
+///   random_prefix  = urandom(14)
+///   plaintext      = random_prefix(14 B) ‖ network_key(16 B) ‖ CRC16_XMODEM(30 B)(2 B)
+///                  = 32 bytes (two AES blocks)
+///   aes_key        = first 16 bytes of x-coordinate of ECDH(server_private, device_public)
+///   output         = AES-128-ECB(aes_key, plaintext)                        — 32 bytes
 pub fn encrypt_network_key(
     server_secret: &SecretKey,
     device_pubkey_bytes: &[u8],
     network_key: &[u8],
 ) -> crate::error::Result<Vec<u8>> {
+    use rand_core::RngCore;
+
     let device_pubkey = parse_p256_pubkey(device_pubkey_bytes)?;
 
     let shared = diffie_hellman(
         server_secret.to_nonzero_scalar(),
         device_pubkey.as_affine(),
     );
-    let shared_x = shared.raw_secret_bytes(); // 32-byte X coordinate
+    let shared_x = shared.raw_secret_bytes(); // 32-byte X coordinate; use first 16 as AES-128 key
 
-    // 16 bytes always valid for AES-128; unwrap is safe.
-    let cipher = Aes128Gcm::new_from_slice(&shared_x[..16])
+    // Build the 32-byte plaintext.
+    let mut plaintext = [0u8; 32];
+    OsRng.fill_bytes(&mut plaintext[..14]);             // 14 random prefix bytes
+    plaintext[14..30].copy_from_slice(&network_key[..16]);
+    let crc = crc16_xmodem(&plaintext[..30]);
+    plaintext[30] = (crc >> 8) as u8;                  // big-endian CRC
+    plaintext[31] = crc as u8;
+
+    // AES-128-ECB: encrypt each 16-byte block independently (no IV, no auth tag).
+    let cipher = Aes128::new_from_slice(&shared_x[..16])
         .expect("16-byte AES-128 key");
-    let nonce = Nonce::default(); // 12 zero bytes — safe for single-use ephemeral keys
+    let mut b0: aes::Block = (<[u8; 16]>::try_from(&plaintext[..16]).unwrap()).into();
+    let mut b1: aes::Block = (<[u8; 16]>::try_from(&plaintext[16..]).unwrap()).into();
+    cipher.encrypt_block(&mut b0);
+    cipher.encrypt_block(&mut b1);
 
-    cipher
-        .encrypt(&nonce, network_key)
-        .map_err(|e| crate::error::Error::Bootstrap(format!("AES-GCM encrypt: {e}")))
+    let mut out = vec![0u8; 32];
+    out[..16].copy_from_slice(&b0);
+    out[16..].copy_from_slice(&b1);
+    Ok(out)
+}
+
+/// CRC-16/XMODEM: poly=0x1021, init=0x0000, no reflection, no XOR output.
+fn crc16_xmodem(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0x0000;
+    for &byte in data {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+        }
+    }
+    crc
 }
 
 // ── CBOR encoding ─────────────────────────────────────────────────────────────
@@ -487,4 +512,115 @@ fn hex(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aes::{
+        cipher::{BlockDecrypt, KeyInit},
+        Aes128,
+    };
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // ── Test fixtures from lwm2m_crypto/tests/auxiliary/ ─────────────────────
+
+    // device_descriptors_dk_2022-05-19_2.json — factory_settings
+    const DK_CERT_DER_HEX: &str = "308201a030820146a003020102021100bcb87d92731ea1f8ba1c543bb038a6b5300a06082a8648ce3d04030230163114301206035504030c0b736d61727473797374656d3020170d3232303531393039303933385a180f32313232303432353039303933385a302f312d302b06035504030c2432373961323230632d663231302d343035382d383635302d3164303736383636326666633059301306072a8648ce3d020106082a8648ce3d0301070342000424e4f8db540fc12d61111c6f2c46a2bd6bad651c8b5e4c7d6557a10064523133d2695df8a52163179aac2efd8b92c9ee7c9a7fe26586251f02b3453cd631ab0ca35a305830090603551d130402300030130603551d25040c300a06082b06010505070302300b0603551d0f04040302078030290603551d1104223020861e736774696e3a333031386631363930303366666663303030303030303032300a06082a8648ce3d0403020348003045022100be6ccf6bcdc11185df285adf3c9322a7bb15ae1be7a54db4b067fa009d2ba07802205cb26e20476b8209cfcaf01da4f4fb5a08c23dc32b1c54cce8d5aa3a9c064f88";
+    // raw 32-byte P-256 scalar extracted from factory_settings.device_private_key SEC1 DER
+    const DK_PRIV_SCALAR_HEX: &str =
+        "27bdafc69076243d65fe23c8203615751bdd3c42371f30b02e5f039079b35847";
+    // uncompressed public key (04 || X || Y) extracted from the DK certificate
+    const DK_PUBKEY_UNCOMPRESSED_HEX: &str = "0424e4f8db540fc12d61111c6f2c46a2bd6bad651c8b5e4c7d6557a10064523133d2695df8a52163179aac2efd8b92c9ee7c9a7fe26586251f02b3453cd631ab0c";
+
+    // device_descriptor_dmd-live.json — factory_data
+    const DMD_CERT_DER_HEX: &str = "308201b63082015ca00302010202147ff9e1a8d4d3eebd1fdd2c18cb974575bb4e24a7300a06082a8648ce3d04030230293110300e060355040a0c0747415244454e413115301306035504030c0c4465766963652043412047313020170d3234303930353133333433365a180f32313234303831323132303531325a302f312d302b06035504030c2433356631343634652d373938392d346362622d396637382d3032313062613439303337373059301306072a8648ce3d020106082a8648ce3d03010703420004f3a401bb86cd485998dc5a235c8a696356261ac3912589ca60b879dc117d795fb5d8aabd54ff3d8bdaeada5112733cafef19d6e8c8bd67bc57374ddd7ae28ce4a35a305830090603551d130402300030290603551d1104223020861e736774696e3a33303334463833313943303037353430303030313836413230130603551d25040c300a06082b06010505070302300b0603551d0f040403020780300a06082a8648ce3d040302034800304502206a008989e77e92dfe93fde5f17520e9586ee86e3b3454083e749a82104851815022100bb1428aa4d51b759712ac9e4fe4d3b9e939fe18878099ffa3c5e2c0154be7978";
+    const DMD_PRIV_SCALAR_HEX: &str =
+        "0f330d1ea9a9e3f661a3da0a4fb243b3aa71c449e6d4b09d85d2dd300b129bbd";
+    const DMD_PUBKEY_UNCOMPRESSED_HEX: &str = "04f3a401bb86cd485998dc5a235c8a696356261ac3912589ca60b879dc117d795fb5d8aabd54ff3d8bdaeada5112733cafef19d6e8c8bd67bc57374ddd7ae28ce4";
+
+    // ── CRC ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn crc16_xmodem_check_value() {
+        // Standard CRC-16/XMODEM check value: input "123456789" → 0x31C3
+        assert_eq!(crc16_xmodem(b"123456789"), 0x31C3);
+    }
+
+    // ── Public key extraction ─────────────────────────────────────────────────
+
+    fn assert_pubkey_from_cert(cert_der_hex: &str, expected_uncompressed_hex: &str) {
+        let cert_der = from_hex(cert_der_hex);
+        let pubkey = parse_p256_pubkey(&cert_der).expect("parse_p256_pubkey");
+        let got = pubkey.to_encoded_point(false);
+        let expected = from_hex(expected_uncompressed_hex);
+        assert_eq!(got.as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    fn parse_p256_pubkey_dk_device() {
+        assert_pubkey_from_cert(DK_CERT_DER_HEX, DK_PUBKEY_UNCOMPRESSED_HEX);
+    }
+
+    #[test]
+    fn parse_p256_pubkey_dmd_live_device() {
+        assert_pubkey_from_cert(DMD_CERT_DER_HEX, DMD_PUBKEY_UNCOMPRESSED_HEX);
+    }
+
+    // ── Encryption round-trip ─────────────────────────────────────────────────
+
+    /// Mirrors test_inclusion_session from the Python test suite:
+    /// encrypt on the server side, decrypt on the device side using the device's
+    /// own private key, then verify the plaintext structure and CRC.
+    fn assert_encrypt_round_trip(cert_der_hex: &str, priv_scalar_hex: &str) {
+        let cert_der = from_hex(cert_der_hex);
+        let network_key = [0x42u8; 16];
+
+        // Server side: generate ephemeral keypair and encrypt.
+        let server_secret = SecretKey::random(&mut OsRng);
+        let server_pubkey = server_secret.public_key();
+        let ciphertext =
+            encrypt_network_key(&server_secret, &cert_der, &network_key).expect("encrypt");
+        assert_eq!(ciphertext.len(), 32);
+
+        // Device side: derive the same shared secret using the device private key.
+        let scalar_bytes: [u8; 32] = from_hex(priv_scalar_hex).try_into().unwrap();
+        let device_secret = SecretKey::from_bytes(&scalar_bytes.into()).unwrap();
+        let shared = diffie_hellman(device_secret.to_nonzero_scalar(), server_pubkey.as_affine());
+        let aes_key = &shared.raw_secret_bytes()[..16];
+
+        // AES-128-ECB decrypt.
+        let cipher = Aes128::new_from_slice(aes_key).unwrap();
+        let mut b0: aes::Block = (<[u8; 16]>::try_from(&ciphertext[..16]).unwrap()).into();
+        let mut b1: aes::Block = (<[u8; 16]>::try_from(&ciphertext[16..]).unwrap()).into();
+        cipher.decrypt_block(&mut b0);
+        cipher.decrypt_block(&mut b1);
+        let mut plaintext = [0u8; 32];
+        plaintext[..16].copy_from_slice(&b0);
+        plaintext[16..].copy_from_slice(&b1);
+
+        // Bytes 14..30 must equal the original network key.
+        assert_eq!(&plaintext[14..30], &network_key, "network key mismatch");
+
+        // Bytes 30..32 must be CRC-16/XMODEM over the first 30 bytes.
+        let expected_crc = crc16_xmodem(&plaintext[..30]);
+        let actual_crc = u16::from_be_bytes([plaintext[30], plaintext[31]]);
+        assert_eq!(actual_crc, expected_crc, "CRC mismatch");
+    }
+
+    #[test]
+    fn encrypt_network_key_dk_device_round_trip() {
+        assert_encrypt_round_trip(DK_CERT_DER_HEX, DK_PRIV_SCALAR_HEX);
+    }
+
+    #[test]
+    fn encrypt_network_key_dmd_live_device_round_trip() {
+        assert_encrypt_round_trip(DMD_CERT_DER_HEX, DMD_PRIV_SCALAR_HEX);
+    }
 }
