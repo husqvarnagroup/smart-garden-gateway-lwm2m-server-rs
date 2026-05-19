@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod coap;
 pub mod config;
 pub mod error;
+pub mod event;
 pub mod housekeeping;
 pub mod ipc;
 pub mod model;

@@ -8,6 +8,7 @@ use lwm2m_gateway::{
     bootstrap::BootstrapRegistry,
     coap,
     coap::server::DispatchRequest,
+    event::{self, EventSender},
     housekeeping,
     ipc,
     registry::DeviceRegistry,
@@ -19,8 +20,13 @@ pub struct TestGateway {
     pub coap_addr: SocketAddr,
     /// Path to the IPC command socket inside the temp dir.
     pub ipc_path: PathBuf,
+    /// Path to the event socket inside the temp dir.
+    pub event_path: PathBuf,
     pub cancel: CancellationToken,
     pub registry: DeviceRegistry,
+    pub bootstrap_registry: BootstrapRegistry,
+    /// Shared event sender — tests can emit events or inspect the broadcast channel.
+    pub event_sender: EventSender,
     // Keeps the temp directory alive for the lifetime of the gateway.
     _tmp: TempDir,
 }
@@ -29,6 +35,7 @@ impl TestGateway {
     pub async fn start() -> Self {
         let tmp = TempDir::new().expect("temp dir");
         let ipc_path = tmp.path().join("cmd.ipc");
+        let event_path = tmp.path().join("event.ipc");
 
         // Bind CoAP UDP to loopback:0 — OS picks a free port.
         let bind_addr: SocketAddr = "[::1]:0".parse().unwrap();
@@ -40,6 +47,7 @@ impl TestGateway {
             vec![0u8; 16],
             Some("coap://[::1]".into()),
         );
+        let event_sender = EventSender::new();
         let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
         let cancel = CancellationToken::new();
 
@@ -48,6 +56,7 @@ impl TestGateway {
             registry.clone(),
             bootstrap_registry.clone(),
             dispatch_tx,
+            event_sender.clone(),
             cancel.clone(),
         ));
         tokio::spawn(coap::client::run(
@@ -58,15 +67,16 @@ impl TestGateway {
         ));
         tokio::spawn(housekeeping::run(
             registry.clone(),
-            bootstrap_registry,
+            bootstrap_registry.clone(),
             cancel.clone(),
         ));
-        tokio::spawn(ipc::run(ipc_path.clone(), cancel.clone()));
+        tokio::spawn(ipc::run(ipc_path.clone(), bootstrap_registry.clone(), cancel.clone()));
+        tokio::spawn(event::run(event_path.clone(), event_sender.clone(), cancel.clone()));
 
         // Yield to let tasks reach their accept/recv loops.
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        Self { coap_addr, ipc_path, cancel, registry, _tmp: tmp }
+        Self { coap_addr, ipc_path, event_path, cancel, registry, bootstrap_registry, event_sender, _tmp: tmp }
     }
 
     pub async fn stop(self) {

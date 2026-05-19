@@ -9,6 +9,7 @@ use lwm2m_gateway::{
     coap,
     coap::server::DispatchRequest,
     config::Config,
+    event::{self, EventSender},
     housekeeping,
     ipc,
     registry::DeviceRegistry,
@@ -27,6 +28,8 @@ async fn main() -> anyhow::Result<()> {
     let registry = DeviceRegistry::new();
     let bootstrap_registry = BootstrapRegistry::new(cfg.network_key.clone(), Some(cfg.server_uri.clone()));
     let bootstrap_registry_hk = bootstrap_registry.clone();
+    let bootstrap_registry_ipc = bootstrap_registry.clone();
+    let event_sender = EventSender::new();
     let cancel = CancellationToken::new();
 
     let socket = coap::bind(cfg.coap_bind_addr, cfg.coap_interface.as_deref())
@@ -52,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
             registry.clone(),
             bootstrap_registry,
             coap_dispatch_tx,
+            event_sender.clone(),
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap server: {e}"))? }
 
@@ -68,9 +72,17 @@ async fn main() -> anyhow::Result<()> {
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("housekeeping: {e}"))? }
 
-        r = ipc::run(PathBuf::from(ipc::DEFAULT_SOCKET_PATH), cancel.clone()) => {
-            r.map_err(|e| anyhow::anyhow!("ipc: {e}"))?
-        }
+        r = ipc::run(
+            PathBuf::from(ipc::DEFAULT_SOCKET_PATH),
+            bootstrap_registry_ipc,
+            cancel.clone(),
+        ) => { r.map_err(|e| anyhow::anyhow!("ipc: {e}"))? }
+
+        r = event::run(
+            PathBuf::from(event::DEFAULT_EVENT_SOCKET_PATH),
+            event_sender,
+            cancel.clone(),
+        ) => { r.map_err(|e| anyhow::anyhow!("event: {e}"))? }
     }
 
     info!("lwm2m-gateway stopped");

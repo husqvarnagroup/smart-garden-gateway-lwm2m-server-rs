@@ -21,6 +21,17 @@ use rand_core::OsRng;
 use tokio::sync::{oneshot, Mutex};
 use tracing::{info, warn};
 
+/// A device that has completed the GET /0/0 cert-read phase and is waiting for
+/// the user to approve its inclusion via the IPC `execute` command.
+struct IncludableEntry {
+    id: u32,
+    /// Most-recently-seen CoAP source address for this device.
+    addr: SocketAddr,
+    /// Fires (with `()`) when the IPC `execute includable_device/<id>/include` arrives.
+    /// Taken on approval; None afterwards.
+    approval_tx: Option<oneshot::Sender<()>>,
+}
+
 /// State for one in-progress bootstrap exchange with a device.
 pub struct BootstrapSession {
     pub endpoint: String,
@@ -39,6 +50,11 @@ struct RegistryInner {
     mid_counter: u16,
     /// Oneshot senders for pending write-phase CON requests, keyed by token.
     write_acks: HashMap<[u8; 8], oneshot::Sender<bool>>,
+    /// Devices awaiting user approval for inclusion (cert read, write phase not yet started).
+    includable: HashMap<String, IncludableEntry>,
+    /// Reverse index: includable id → endpoint name.
+    includable_by_id: HashMap<u32, String>,
+    next_includable_id: u32,
 }
 
 /// Thread-safe registry of active bootstrap sessions.
@@ -82,6 +98,9 @@ impl BootstrapRegistry {
                 cert_cache: HashMap::new(),
                 mid_counter: mid_start,
                 write_acks: HashMap::new(),
+                includable: HashMap::new(),
+                includable_by_id: HashMap::new(),
+                next_includable_id: 1,
             })),
             token_counter: Arc::new(AtomicU32::new(token_start)),
             server_secret_key: Arc::new(secret),
@@ -219,6 +238,70 @@ impl BootstrapRegistry {
         }
     }
 
+    /// Register a device as includable after its cert has been read.
+    ///
+    /// Returns `(id, approval_rx)` — the receiver fires when the user approves inclusion
+    /// via the IPC `execute` command.  Returns `None` if already registered.
+    pub async fn register_includable(
+        &self,
+        endpoint: String,
+        addr: SocketAddr,
+    ) -> Option<(u32, oneshot::Receiver<()>)> {
+        let mut inner = self.inner.lock().await;
+        if inner.includable.contains_key(&endpoint) {
+            return None;
+        }
+        let id = inner.next_includable_id;
+        inner.next_includable_id += 1;
+        let (tx, rx) = oneshot::channel();
+        inner.includable.insert(
+            endpoint.clone(),
+            IncludableEntry { id, addr, approval_tx: Some(tx) },
+        );
+        inner.includable_by_id.insert(id, endpoint);
+        Some((id, rx))
+    }
+
+    /// Return the includable id for this endpoint if it is pending approval.
+    pub async fn includable_id(&self, endpoint: &str) -> Option<u32> {
+        self.inner.lock().await.includable.get(endpoint).map(|e| e.id)
+    }
+
+    /// Update the source address for a pending includable device (called on each /bs while waiting).
+    pub async fn update_includable_addr(&self, endpoint: &str, addr: SocketAddr) {
+        if let Some(e) = self.inner.lock().await.includable.get_mut(endpoint) {
+            e.addr = addr;
+        }
+    }
+
+    /// Return the most-recently-seen address of a pending includable device.
+    pub async fn get_includable_addr(&self, endpoint: &str) -> Option<SocketAddr> {
+        self.inner.lock().await.includable.get(endpoint).map(|e| e.addr)
+    }
+
+    /// Approve inclusion for the device with `id`.
+    ///
+    /// Fires the approval oneshot and returns `(endpoint, addr)`.
+    /// Returns `None` if the device is not found or has already been approved.
+    pub async fn approve_inclusion(&self, id: u32) -> Option<(String, SocketAddr)> {
+        let mut inner = self.inner.lock().await;
+        let endpoint = inner.includable_by_id.get(&id)?.clone();
+        let entry = inner.includable.get_mut(&endpoint)?;
+        let addr = entry.addr;
+        let tx = entry.approval_tx.take()?;
+        let _ = tx.send(());
+        info!(endpoint = %endpoint, id, "bootstrap: inclusion approved");
+        Some((endpoint, addr))
+    }
+
+    /// Remove an includable entry after the write phase completes or fails.
+    pub async fn remove_includable(&self, endpoint: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some(e) = inner.includable.remove(endpoint) {
+            inner.includable_by_id.remove(&e.id);
+        }
+    }
+
     fn alloc_inner(&self, inner: &mut RegistryInner) -> ([u8; 8], u16) {
         let id = self.token_counter.fetch_add(1, Ordering::Relaxed);
         let mut token = [0u8; 8];
@@ -318,6 +401,7 @@ pub fn encrypt_network_key(
     // AES-128-ECB: encrypt each 16-byte block independently (no IV, no auth tag).
     let cipher = Aes128::new_from_slice(&shared_x[..16])
         .expect("16-byte AES-128 key");
+    // GenericArray doesn't implement TryFrom<&[u8]>, so go through [u8; 16] first.
     let mut b0: aes::Block = (<[u8; 16]>::try_from(&plaintext[..16]).unwrap()).into();
     let mut b1: aes::Block = (<[u8; 16]>::try_from(&plaintext[16..]).unwrap()).into();
     cipher.encrypt_block(&mut b0);
@@ -591,7 +675,8 @@ mod tests {
 
         // Device side: derive the same shared secret using the device private key.
         let scalar_bytes: [u8; 32] = from_hex(priv_scalar_hex).try_into().unwrap();
-        let device_secret = SecretKey::from_bytes(&scalar_bytes.into()).unwrap();
+        let device_secret =
+            SecretKey::from_bytes(&scalar_bytes.into()).unwrap();
         let shared = diffie_hellman(device_secret.to_nonzero_scalar(), server_pubkey.as_affine());
         let aes_key = &shared.raw_secret_bytes()[..16];
 
