@@ -19,18 +19,9 @@ use p256::{
 };
 use rand_core::OsRng;
 use tokio::sync::{oneshot, Mutex};
+use std::collections::HashSet;
 use tracing::{info, warn};
 
-/// A device that has completed the GET /0/0 cert-read phase and is waiting for
-/// the user to approve its inclusion via the IPC `execute` command.
-struct IncludableEntry {
-    id: u32,
-    /// Most-recently-seen CoAP source address for this device.
-    addr: SocketAddr,
-    /// Fires (with `()`) when the IPC `execute includable_device/<id>/include` arrives.
-    /// Taken on approval; None afterwards.
-    approval_tx: Option<oneshot::Sender<()>>,
-}
 
 /// State for one in-progress bootstrap exchange with a device.
 pub struct BootstrapSession {
@@ -43,18 +34,21 @@ pub struct BootstrapSession {
 struct RegistryInner {
     /// Active GET /0/0 requests keyed by the 4-byte token (padded to 8).
     by_token: HashMap<[u8; 8], BootstrapSession>,
-    /// Reverse index: endpoint name → token, so duplicate /bs requests can be ignored.
+    /// Reverse index: endpoint name → token, so duplicate /bs requests can be deduplicated.
     by_endpoint: HashMap<String, [u8; 8]>,
-    /// Cached public-key payloads for devices that completed the GET /0/0 phase.
+    /// Cached public-key payloads — permanent, cert never changes per device.
     cert_cache: HashMap<String, Vec<u8>>,
+    /// Endpoints the user has explicitly approved for inclusion on their next /bs.
+    /// Consumed (removed) when the write phase starts.
+    approved: HashSet<String>,
+    /// Stable numeric ID assigned to each seen endpoint (for IPC path references).
+    includable_ids: HashMap<String, u32>,
+    /// Reverse index: id → endpoint.
+    includable_by_id: HashMap<u32, String>,
+    next_includable_id: u32,
     mid_counter: u16,
     /// Oneshot senders for pending write-phase CON requests, keyed by token.
     write_acks: HashMap<[u8; 8], oneshot::Sender<bool>>,
-    /// Devices awaiting user approval for inclusion (cert read, write phase not yet started).
-    includable: HashMap<String, IncludableEntry>,
-    /// Reverse index: includable id → endpoint name.
-    includable_by_id: HashMap<u32, String>,
-    next_includable_id: u32,
 }
 
 /// Thread-safe registry of active bootstrap sessions.
@@ -96,11 +90,12 @@ impl BootstrapRegistry {
                 by_token: HashMap::new(),
                 by_endpoint: HashMap::new(),
                 cert_cache: HashMap::new(),
-                mid_counter: mid_start,
-                write_acks: HashMap::new(),
-                includable: HashMap::new(),
+                approved: HashSet::new(),
+                includable_ids: HashMap::new(),
                 includable_by_id: HashMap::new(),
                 next_includable_id: 1,
+                mid_counter: mid_start,
+                write_acks: HashMap::new(),
             })),
             token_counter: Arc::new(AtomicU32::new(token_start)),
             server_secret_key: Arc::new(secret),
@@ -238,67 +233,46 @@ impl BootstrapRegistry {
         }
     }
 
-    /// Register a device as includable after its cert has been read.
-    ///
-    /// Returns `(id, approval_rx)` — the receiver fires when the user approves inclusion
-    /// via the IPC `execute` command.  Returns `None` if already registered.
-    pub async fn register_includable(
-        &self,
-        endpoint: String,
-        addr: SocketAddr,
-    ) -> Option<(u32, oneshot::Receiver<()>)> {
+    /// Get or create a stable numeric ID for this endpoint (used in IPC path references).
+    pub async fn ensure_includable_id(&self, endpoint: &str) -> u32 {
         let mut inner = self.inner.lock().await;
-        if inner.includable.contains_key(&endpoint) {
-            return None;
+        if let Some(&id) = inner.includable_ids.get(endpoint) {
+            return id;
         }
         let id = inner.next_includable_id;
         inner.next_includable_id += 1;
-        let (tx, rx) = oneshot::channel();
-        inner.includable.insert(
-            endpoint.clone(),
-            IncludableEntry { id, addr, approval_tx: Some(tx) },
-        );
-        inner.includable_by_id.insert(id, endpoint);
-        Some((id, rx))
+        inner.includable_ids.insert(endpoint.to_owned(), id);
+        inner.includable_by_id.insert(id, endpoint.to_owned());
+        id
     }
 
-    /// Return the includable id for this endpoint if it is pending approval.
-    pub async fn includable_id(&self, endpoint: &str) -> Option<u32> {
-        self.inner.lock().await.includable.get(endpoint).map(|e| e.id)
+    /// Returns true if the user has pre-approved this endpoint for inclusion.
+    pub async fn is_approved(&self, endpoint: &str) -> bool {
+        self.inner.lock().await.approved.contains(endpoint)
     }
 
-    /// Update the source address for a pending includable device (called on each /bs while waiting).
-    pub async fn update_includable_addr(&self, endpoint: &str, addr: SocketAddr) {
-        if let Some(e) = self.inner.lock().await.includable.get_mut(endpoint) {
-            e.addr = addr;
-        }
-    }
-
-    /// Return the most-recently-seen address of a pending includable device.
-    pub async fn get_includable_addr(&self, endpoint: &str) -> Option<SocketAddr> {
-        self.inner.lock().await.includable.get(endpoint).map(|e| e.addr)
-    }
-
-    /// Approve inclusion for the device with `id`.
+    /// Record user approval for the device with `id`.
     ///
-    /// Fires the approval oneshot and returns `(endpoint, addr)`.
-    /// Returns `None` if the device is not found or has already been approved.
-    pub async fn approve_inclusion(&self, id: u32) -> Option<(String, SocketAddr)> {
+    /// The approval is stored and consumed on the device's next /bs request.
+    /// Returns the endpoint name if found, `None` if the id is unknown.
+    pub async fn approve_inclusion(&self, id: u32) -> Option<String> {
         let mut inner = self.inner.lock().await;
         let endpoint = inner.includable_by_id.get(&id)?.clone();
-        let entry = inner.includable.get_mut(&endpoint)?;
-        let addr = entry.addr;
-        let tx = entry.approval_tx.take()?;
-        let _ = tx.send(());
-        info!(endpoint = %endpoint, id, "bootstrap: inclusion approved");
-        Some((endpoint, addr))
+        inner.approved.insert(endpoint.clone());
+        info!(endpoint = %endpoint, id, "bootstrap: inclusion approved, awaiting next /bs");
+        Some(endpoint)
     }
 
-    /// Remove an includable entry after the write phase completes or fails.
-    pub async fn remove_includable(&self, endpoint: &str) {
+    /// Consume the approval flag when the write phase starts.
+    pub async fn consume_approval(&self, endpoint: &str) {
+        self.inner.lock().await.approved.remove(endpoint);
+    }
+
+    /// Remove the includable ID mapping after the write phase completes or fails.
+    pub async fn remove_includable_id(&self, endpoint: &str) {
         let mut inner = self.inner.lock().await;
-        if let Some(e) = inner.includable.remove(endpoint) {
-            inner.includable_by_id.remove(&e.id);
+        if let Some(id) = inner.includable_ids.remove(endpoint) {
+            inner.includable_by_id.remove(&id);
         }
     }
 

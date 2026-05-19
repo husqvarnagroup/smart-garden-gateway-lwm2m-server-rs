@@ -106,7 +106,7 @@ async fn handle_packet(
         }
         // Device acknowledging one of our downlink requests.
         MessageType::Acknowledgement => {
-            handle_ack(packet, addr, socket, registry, bootstrap_registry, event_sender).await?;
+            handle_ack(packet, addr, registry, bootstrap_registry).await?;
         }
         MessageType::Reset => {
             // Device rejected our message — treat as error for the in-flight op.
@@ -179,22 +179,14 @@ async fn handle_bootstrap(
         return Ok(());
     }
 
-    // Case 1: cert received and device is pending user approval for inclusion.
-    // ACK each /bs so the device stops retransmitting, and re-emit the pending event
-    // so the app stays informed while the user decides.
-    if let Some(id) = bootstrap_registry.includable_id(&endpoint).await {
-        bootstrap_registry.update_includable_addr(&endpoint, addr).await;
-        let bytes = make_response_bytes(&packet, Status::Changed, None)?;
-        send_bootstrap_packet(socket, &bytes, addr).await?;
-        event_sender.send_includable(id, &endpoint, false, false);
-        info!(%endpoint, id, %addr, "bootstrap: pending inclusion, ACKed /bs");
-        return Ok(());
-    }
+    // Every /bs gets an event — assign a stable ID first.
+    let id = bootstrap_registry.ensure_includable_id(&endpoint).await;
+    event_sender.send_includable(id, &endpoint, false, false);
+    info!(%endpoint, id, %addr, "bootstrap: /bs received");
 
-    // Case 2: cert cached but no pending includable entry — device is re-bootstrapping
-    // after a previously completed inclusion.  Trigger the write phase directly.
-    if bootstrap_registry.has_cert(&endpoint).await {
-        info!(%endpoint, %addr, "bootstrap: re-bootstrap, triggering write phase");
+    // Case 1: user has approved — ACK, consume approval, start write phase.
+    if bootstrap_registry.is_approved(&endpoint).await {
+        bootstrap_registry.consume_approval(&endpoint).await;
         let bytes = make_response_bytes(&packet, Status::Changed, None)?;
         send_bootstrap_packet(socket, &bytes, addr).await?;
 
@@ -203,40 +195,53 @@ async fn handle_bootstrap(
             return Ok(());
         };
 
-        let socket_clone = socket.clone();
+        let socket_c = socket.clone();
         let br = bootstrap_registry.clone();
+        let es = event_sender.clone();
+        let ep = endpoint.clone();
         tokio::spawn(async move {
-            if let Err(e) = bootstrap_write_phase(endpoint, addr, socket_clone, br, server_uri).await {
-                tracing::error!("bootstrap write phase failed: {e}");
+            es.send_includable(id, &ep, true, false);
+            match bootstrap_write_phase(ep.clone(), addr, socket_c, br.clone(), server_uri).await {
+                Ok(()) => {
+                    es.send_includable(id, &ep, true, true);
+                    br.remove_includable_id(&ep).await;
+                    info!(endpoint = %ep, "inclusion completed");
+                }
+                Err(e) => {
+                    error!(endpoint = %ep, "bootstrap write phase failed: {e}");
+                    br.remove_includable_id(&ep).await;
+                }
             }
         });
         return Ok(());
     }
 
-    // Case 3: first /bs from this device — start GET /0/0 to read its certificate.
-    let Some((token, mid)) = bootstrap_registry.begin(endpoint.clone(), addr).await else {
-        info!(%endpoint, "bootstrap: GET /0/0 already in flight, ignoring duplicate /bs");
-        return Ok(());
-    };
+    // Case 2: cert not yet cached — start GET /0/0 if not already in flight.
+    if !bootstrap_registry.has_cert(&endpoint).await {
+        let Some((token, mid)) = bootstrap_registry.begin(endpoint.clone(), addr).await else {
+            info!(%endpoint, "bootstrap: GET /0/0 already in flight");
+            return Ok(());
+        };
 
-    // The device needs ~3 s after transmitting CON POST /bs to open its response socket.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+        // Device needs ~3 s after sending /bs to open its receive socket.
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let mut get = Packet::new();
-    get.header.set_type(MessageType::Confirmable);
-    get.header.code = MessageClass::Request(Method::Get);
-    get.header.message_id = mid;
-    get.set_token(token[..4].to_vec()); // 4-byte token — device echoes it back
-    get.add_option(CoapOption::UriPath, b"0".to_vec());
-    get.add_option(CoapOption::UriPath, b"0".to_vec());
+        let mut get = Packet::new();
+        get.header.set_type(MessageType::Confirmable);
+        get.header.code = MessageClass::Request(Method::Get);
+        get.header.message_id = mid;
+        get.set_token(token[..4].to_vec());
+        get.add_option(CoapOption::UriPath, b"0".to_vec());
+        get.add_option(CoapOption::UriPath, b"0".to_vec());
 
-    let bytes = get
-        .to_bytes()
-        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
-    // TC=0x0c signals the radio module: no MAC-layer encryption yet.
-    send_bootstrap_packet(socket, &bytes, addr).await?;
+        let bytes = get
+            .to_bytes()
+            .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
+        send_bootstrap_packet(socket, &bytes, addr).await?;
+        info!(%endpoint, %addr, mid, "bootstrap: sent GET /0/0 (TC=0x0c)");
+    }
+    // else: cert cached, awaiting user approval — event already emitted, nothing more to do.
 
-    info!(%endpoint, %addr, mid, "bootstrap: sent CON GET /0/0 (TC=0x0c, /bs not ACKed)");
     Ok(())
 }
 
@@ -359,10 +364,8 @@ async fn handle_update(
 async fn handle_ack(
     packet: Packet,
     addr: SocketAddr,
-    socket: &Arc<UdpSocket>,
     registry: &DeviceRegistry,
     bootstrap_registry: &BootstrapRegistry,
-    event_sender: &EventSender,
 ) -> Result<()> {
     let token = token_array(packet.get_token());
 
@@ -371,50 +374,14 @@ async fn handle_ack(
         return Ok(());
     }
 
-    // Bootstrap GET /0/0 ACK (token IDs ≥ 0x8000_0000, no overlap with op tokens).
+    // Bootstrap GET /0/0 ACK — cache the cert; write phase is triggered on the next /bs.
     if bootstrap_registry.is_pending(&token).await {
         if let Some(session) = bootstrap_registry.complete(&token, packet.payload.clone()).await {
             info!(
                 endpoint = %session.endpoint,
                 bytes = session.pubkey_payload.as_ref().map_or(0, |p| p.len()),
-                "bootstrap: public key received — awaiting inclusion approval"
+                "bootstrap: cert cached, awaiting user approval"
             );
-
-            // Register as includable and emit the pending event.
-            if let Some((id, approval_rx)) =
-                bootstrap_registry.register_includable(session.endpoint.clone(), addr).await
-            {
-                event_sender.send_includable(id, &session.endpoint, false, false);
-
-                // Spawn a task that blocks until the user approves (via IPC execute),
-                // then runs the write phase and emits completion events.
-                if let Some(server_uri) = bootstrap_registry.server_uri().map(str::to_owned) {
-                    let socket_c = socket.clone();
-                    let br = bootstrap_registry.clone();
-                    let es = event_sender.clone();
-                    let ep = session.endpoint.clone();
-                    tokio::spawn(async move {
-                        if approval_rx.await.is_err() {
-                            return; // sender dropped — server shutting down
-                        }
-                        let Some(device_addr) = br.get_includable_addr(&ep).await else {
-                            return;
-                        };
-                        es.send_includable(id, &ep, true, false);
-                        match bootstrap_write_phase(ep.clone(), device_addr, socket_c, br.clone(), server_uri).await {
-                            Ok(()) => {
-                                es.send_includable(id, &ep, true, true);
-                                br.remove_includable(&ep).await;
-                                info!(endpoint = %ep, "inclusion completed");
-                            }
-                            Err(e) => {
-                                error!(endpoint = %ep, "bootstrap write phase failed: {e}");
-                                br.remove_includable(&ep).await;
-                            }
-                        }
-                    });
-                }
-            }
         }
         return Ok(());
     }

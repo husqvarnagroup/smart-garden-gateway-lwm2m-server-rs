@@ -1,10 +1,10 @@
 # lwm2m-gateway
 
-Rust service running on an embedded Linux gateway. It acts as an LWM2M server for IoT devices communicating over a proprietary radio (PPP/IPv6) and exposes a Unix domain socket for local command/event integration.
+Rust service running on an embedded Linux gateway. It acts as an LWM2M server for IoT devices communicating over a proprietary radio (PPP/IPv6) and exposes Unix domain sockets for local command/event integration.
 
 ```
 local process  ──IPC (Unix socket)──►  lwm2m-gateway  ──CoAP/UDP/IPv6──►  IoT devices
-                                        (on gateway)         (ppp0)
+               ◄──event (Unix socket)─  (on gateway)         (ppp0)
 ```
 
 ---
@@ -75,7 +75,8 @@ The `-O` flag forces legacy SCP protocol — required because the gateway's Busy
 lwm2m-gateway ppp0 --bind-to-device \
     --server-uri "coap://[fc00::6:100:0:0]" \
     --port 20017 \
-    --lb-key-file /var/lib/lemonbeatd/Network_management/Network_key.json
+    --lb-key-file /var/lib/lemonbeatd/Network_management/Network_key.json \
+    --ipso-directories /usr/share/lwm2m/objects /etc/lwm2m/objects
 ```
 
 Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2m_gateway=debug`.
@@ -89,17 +90,21 @@ Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2m_gateway=debug`.
 | `--server-uri` | no | `coap://[fc00::6:100:0:0]` | This server's CoAP URI written to devices during bootstrap |
 | `--port` | no | `20017` | UDP port to listen on |
 | `--lb-key-file` | no | `/var/lib/lemonbeatd/…/Network_key.json` | JSON file containing `"network_key"` as a hex string |
+| `--ipso-directories` | no | _(none)_ | One or more directories containing IPSO object definition XML files (space-separated). All `*.xml` files in each directory are loaded at startup and used to translate `/dp` payloads into named, typed events. |
 | `RUST_LOG` | no | `lwm2m_gateway=info` | Log filter (env var) |
 
 ---
 
-## IPC command socket
+## IPC sockets
 
-The gateway listens on `/tmp/lwm2mserver-command.ipc` (Unix domain socket). Messages are newline-terminated JSON arrays.
+The gateway exposes two Unix domain sockets for integration with local processes. All messages are newline-terminated JSON arrays.
 
-### List registered devices
+### Command socket — `/tmp/lwm2mserver-command.ipc`
 
-Request:
+Receives commands from local processes. Currently supported operations:
+
+#### List registered devices
+
 ```json
 [{"op":"read","entity":{"service":"lwm2mserver","path":"devices"}}]
 ```
@@ -109,11 +114,75 @@ Response:
 [{"payload":{},"success":true}]
 ```
 
+#### Approve device inclusion
+
+After a device sends its first `/bs` request its certificate is read and an `includable_device` event is emitted (see Event socket below). To allow the device to join the network, send:
+
+```json
+[{"op":"execute","entity":{"service":"lwm2mserver","path":"includable_device/<id>/include"}}]
+```
+
+where `<id>` is the numeric identifier from the event. The approval is stored; the write phase starts automatically on the device's next `/bs` request.
+
+Response:
+```json
+[{"success":true}]
+```
+
+Returns `{"success":false}` if `<id>` is not known.
+
 ---
 
-## Bootstrap protocol
+### Event socket — `/tmp/lwm2mserver-event.ipc`
 
-Devices must be provisioned with the server address and network key before they can register. This is done via a proprietary two-phase bootstrap over the `/bs` path.
+Emits events to all connected listeners as newline-terminated JSON arrays. Connect and read lines; the socket stays open and streams events as they occur.
+
+#### Includable device event
+
+Emitted on **every** `/bs` request from a device that has not yet been fully included. The event repeats as long as the device keeps sending `/bs` (approximately every 5 seconds while in bootstrap mode).
+
+```json
+[{
+  "op": "update",
+  "entity": {"service": "lwm2mserver", "path": "includable_device/<id>"},
+  "payload": {
+    "identifier":          {"vs": "<sgtin>",   "ts": <unix_ts>},
+    "inclusion_started":   {"vb": false,        "ts": <unix_ts>},
+    "inclusion_completed": {"vb": false,        "ts": <unix_ts>}
+  },
+  "metadata": {"source": "lwm2mserver", "sequence": <n>}
+}]
+```
+
+Once the user has approved and the write phase has started, `inclusion_started` becomes `true`. When the write phase finishes successfully, a final event with both `inclusion_started` and `inclusion_completed` set to `true` is emitted.
+
+#### Device data event
+
+Emitted when a registered device pushes a `/dp` (data push) payload. Object and resource names come from the IPSO XML definitions loaded via `--ipso-directories`. Each resource value uses a type-tagged key (`vi` integer, `vf` float, `vs` string, `vb` boolean, `vt` time, `vo` opaque/base64; arrays use `ai`, `af`, `as`, `ab`, `ao`).
+
+```json
+[{
+  "op": "update",
+  "entity": {"device": "<sgtin>", "path": ""},
+  "payload": {
+    "device": {
+      "_urn": "urn:oma:lwm2m:oma:3",
+      "0": {
+        "manufacturer":     {"vs": "ACME",  "ts": 1234567890},
+        "firmware_version": {"vs": "1.2.3", "ts": 1234567890},
+        "error_code":       {"ai": [0],     "ts": 1234567890}
+      }
+    }
+  },
+  "metadata": {"source": "lwm2mserver", "sequence": <n>}
+}]
+```
+
+---
+
+## Bootstrap / device inclusion protocol
+
+Devices enter bootstrap mode to receive provisioning credentials (server URI, network key). The flow requires explicit user approval for each inclusion.
 
 ### IPv6 Traffic Class
 
@@ -126,27 +195,32 @@ The radio module uses the IPv6 Traffic Class byte to control MAC-layer encryptio
 
 All bootstrap packets (server → device) are sent with TC=0x0c. All post-bootstrap traffic (registration responses, data push ACKs) uses TC=0x1c.
 
-### Phase 1 — read device public key
+### Step 1 — certificate read
 
-1. Device sends `CON POST /bs?ep=<name>` (TC=0x0c). The server does **not** ACK this immediately.
-2. After a 3-second delay (to let the device open its response socket), the server sends `CON GET /0/0` with TC=0x0c.
-3. Device responds with its X.509 DER certificate. The server extracts the P-256 public key and caches it under the device endpoint name.
-4. Because the initial `POST /bs` was never ACKed, the device retransmits it, triggering Phase 2.
+1. Device sends `CON POST /bs?ep=<name>` repeatedly (~every 5 s). The server does **not** ACK.
+2. On the first `/bs` the server waits 3 seconds (to let the device open its receive socket), then sends `CON GET /0/0` with TC=0x0c to read the device's X.509 certificate.
+3. The device ACKs with its certificate payload. The server extracts and caches the P-256 public key permanently (it never changes for a given device, so it is not re-read on subsequent bootstrap attempts).
+4. Every `/bs` — including those received while waiting for the cert and those received after — emits an `includable_device` event on the event socket.
 
-### Phase 2 — write network credentials
+### Step 2 — user approval
 
-On receiving the second `POST /bs` (after the cert is cached):
+The local application receives `includable_device` events and presents the device to the user. When the user approves, the application sends the `execute includable_device/<id>/include` IPC command. The gateway stores the approval; no immediate action is taken.
 
-1. Server sends `2.04 Changed` ACK (TC=0x0c).
-2. Server executes the write sequence — all packets are CON with TC=0x0c, each waits for device ACK before proceeding (RFC 7252 retransmit: 2 s initial, up to 4 retries, exponential backoff):
+### Step 3 — credential write
 
-| Step | Operation | Object | Content |
+On the next `/bs` received after approval has been stored:
+
+1. Server sends `2.04 Changed` ACK (TC=0x0c) — this is the **only** `/bs` that is ever ACKed.
+2. The approval is consumed (a second factory reset requires re-approval).
+3. Server executes the write sequence — all packets are CON with TC=0x0c, each waits for device ACK before proceeding (RFC 7252: 2 s initial timeout, up to 4 retries, exponential backoff):
+
+| Step | Operation | Path | Content |
 |---|---|---|---|
-| 1 | `DELETE /1` | Server Object | Clear existing server instances |
-| 2 | `PUT /1/1` | Server Object | Short Server ID=1, Lifetime=86400, Binding="U" (SenML+CBOR) |
-| 3 | `DELETE /0` | Security Object | Clear existing security instances |
-| 4 | `PUT /0/1` | Security Object | Server URI, server public key, encrypted network key (SenML+CBOR) |
-| 5 | `POST /bs` | — | Bootstrap finish signal |
+| 1 | `DELETE` | `/1` | Clear existing Server Object instances |
+| 2 | `PUT` | `/1/1` | Short Server ID=1, Lifetime=86400, Binding="U" (SenML+CBOR) |
+| 3 | `DELETE` | `/0` | Clear existing Security Object instances |
+| 4 | `PUT` | `/0/1` | Server URI, server public key, encrypted network key (SenML+CBOR) |
+| 5 | `POST` | `/bs` | Bootstrap finish signal |
 
 After the device ACKs `POST /bs` it switches to encrypted traffic (TC=0x1c).
 
@@ -159,7 +233,20 @@ After the device ACKs `POST /bs` it switches to encrypted traffic (TC=0x1c).
 { "network_key": "be3960fa8ccd1e306e579096dcecc0d6" }
 ```
 
-The key is ECDH-encrypted for the device (ECIES: AES-128-GCM using the shared secret derived from the server's ephemeral private key and the device's P-256 public key from its X.509 certificate) and written to `/0/1/5`.
+The key is ECDH-encrypted per device: AES-128-ECB using the first 16 bytes of the ECDH shared secret (server ephemeral private key × device P-256 public key from its X.509 certificate). Plaintext structure: 14 random bytes ‖ 16-byte key ‖ 2-byte CRC-16/XMODEM.
+
+---
+
+## IPSO object definitions
+
+When `--ipso-directories` is specified, the gateway loads all `*.xml` files matching the OMA LWM2M object definition schema. These are used to:
+
+- Resolve numeric object/resource IDs to human-readable names in `/dp` event payloads
+- Determine correct value types (integer, float, string, boolean, time, opaque)
+- Detect multi-instance resources (encoded as JSON arrays `ai`/`af`/`as`/…)
+- Select the correct `_urn` based on the object version declared by the device at registration
+
+The `<ObjectVersion>` element in each XML file is used as the version key. If a device registered with `ver=1.1` for object 3, the definition from the file containing `<ObjectVersion>1.1</ObjectVersion>` is used. Files without an `<ObjectVersion>` element are used as the unversioned fallback.
 
 ---
 
@@ -167,48 +254,65 @@ The key is ECDH-encrypted for the device (ECIES: AES-128-GCM using the shared se
 
 ```
 src/
-├── main.rs           Entry point. Spawns four long-running tasks under a shared
+├── main.rs           Entry point. Spawns long-running tasks under a shared
 │                     CancellationToken; any task failure brings down the process
 │                     (suitable for systemd restart).
 │
 ├── config.rs         Config::from_args() — clap-based CLI argument parsing.
 │
 ├── model.rs          Shared domain types:
-│                       Device            — registered device state
+│                       Device            — registered device state (includes
+│                                           object_versions from /rd link-format)
 │                       PendingOperation  — queued or in-flight CoAP op
 │                       LwM2mCommand      — Read / Write / Execute
 │
 ├── registry.rs       DeviceRegistry (Arc<RwLock<…>>). Owns all device state.
 │                     Key operations:
-│                       register()           — called on CoAP POST /rd
-│                       touch()              — updates last-contact on any packet
-│                       drain_pending()      — returns queued ops on device heartbeat
-│                       place_in_flight()    — moves a sent op to the awaiting-ACK map
-│                       complete_in_flight() — removes op when CoAP ACK arrives
-│                       expire_stale()       — purges devices past lifetime + grace
+│                       register()                — called on CoAP POST /rd
+│                       touch()                   — updates last-contact on any packet
+│                       drain_pending()           — returns queued ops on heartbeat
+│                       place_in_flight()         — moves a sent op to in-flight map
+│                       complete_in_flight()      — removes op when CoAP ACK arrives
+│                       expire_stale()            — purges devices past lifetime + grace
+│                       endpoint_by_addr()        — resolves source address → endpoint
+│                       object_versions_by_addr() — per-object ver= from /rd
 │
-├── bootstrap.rs      BootstrapRegistry — drives the two-phase bootstrap described
-│                     above. Generates the ephemeral P-256 keypair at startup,
-│                     caches device X.509 certificates across /bs retransmits,
-│                     performs ECDH key encapsulation for the network key, and
-│                     tracks per-token oneshot channels for the write sequence.
+├── bootstrap.rs      BootstrapRegistry — drives device inclusion:
+│                       • Generates ephemeral P-256 keypair at startup
+│                       • Caches device X.509 certs permanently (cert never changes)
+│                       • Tracks pending GET /0/0 exchanges by token
+│                       • Stores user approval (approve_inclusion / is_approved /
+│                         consume_approval) — approval consumed on next /bs
+│                       • Assigns stable numeric IDs to endpoints for IPC references
+│                       • Performs ECDH key encapsulation for the network key
 │
 ├── error.rs          Unified Error enum (thiserror).
 │
-├── ipc.rs            Unix socket server on /tmp/lwm2mserver-command.ipc.
-│                     Handles newline-framed JSON array requests from local
-│                     processes; currently supports "read devices".
+├── ipso.rs           IpsoModel — loads IPSO object definition XML files at startup.
+│                     Keyed by (object_id, version). Provides get_versioned() for
+│                     version-aware lookup with unversioned fallback.
+│
+├── ipc.rs            Command socket server on /tmp/lwm2mserver-command.ipc.
+│                     Handles newline-framed JSON requests:
+│                       read devices                         — list registered devices
+│                       execute includable_device/<id>/include — approve inclusion
+│
+├── event.rs          Event socket server on /tmp/lwm2mserver-event.ipc.
+│                     Broadcasts events to all connected listeners via a tokio
+│                     broadcast channel. Events: includable_device, device data.
 │
 ├── coap/
 │   ├── mod.rs        UDP socket bind helper (socket2, SO_BINDTODEVICE).
+│   │                 sgtin_from_ep() — strips URN prefix from ep parameter.
 │   ├── server.rs     Inbound CoAP task. recv_from loop on [::]:20017.
 │   │                 Handles:
-│   │                   POST /bs          — bootstrap phase 1 or phase 2 write sequence
-│   │                   POST /rd          — device registration → 2.01 Created (TC=0x1c)
-│   │                   POST /rd/<id>     — heartbeat → 2.04 Changed + drain ops (TC=0x1c)
-│   │                   POST /dp          — data push → 2.04 Changed (TC=0x1c) + log SenML
-│   │                   ACK              — bootstrap write-step or op oneshot completion
-│   │                   RST              — op oneshot fires with CoapError
+│   │                   POST /bs     — emit includable event; if approved: ACK +
+│   │                                  write phase; else: GET /0/0 if cert not cached
+│   │                   POST /rd     — device registration → 2.01 Created (TC=0x1c)
+│   │                   POST /rd/<id>— heartbeat → 2.04 Changed + drain ops (TC=0x1c)
+│   │                   POST /dp     — SenML+CBOR → IPSO-named event (TC=0x1c)
+│   │                   ACK          — bootstrap write-step or op oneshot completion
+│   │                   RST          — op oneshot fires with CoapError
 │   └── client.rs     Outbound CoAP task. Receives DispatchRequest from channel,
 │                     builds CON requests, retransmits up to 4× with exponential
 │                     backoff (2 s initial, RFC 7252 defaults).
@@ -223,7 +327,7 @@ src/
                       ┌──────────────────────────────────────┐
 UDP :20017 ───────────►│ coap_server_task                     │
                       │   recv_from loop                     │──► coap_dispatch_tx
-                      │   registration / heartbeat / ACK     │
+                      │   /bs / /rd / /dp / ACK / RST        │──► event_sender (broadcast)
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
@@ -233,7 +337,12 @@ UDP :20017 ───────────►│ coap_server_task             
 
                       ┌──────────────────────────────────────┐
 /tmp/…-command.ipc ──►│ ipc_task                             │
-                      │   read devices / future commands     │
+                      │   read devices / approve inclusion   │
+                      └──────────────────────────────────────┘
+
+                      ┌──────────────────────────────────────┐
+/tmp/…-event.ipc  ◄───│ event_task                           │◄── event_sender (broadcast)
+                      │   fan-out to connected listeners     │
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐

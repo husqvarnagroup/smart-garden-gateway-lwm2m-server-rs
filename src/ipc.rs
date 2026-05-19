@@ -96,12 +96,12 @@ async fn handle_request(
             let middle = &path["includable_device/".len()..path.len() - "/include".len()];
             match middle.parse::<u32>() {
                 Ok(id) => match bootstrap_registry.approve_inclusion(id).await {
-                    Some((endpoint, _)) => {
+                    Some(endpoint) => {
                         info!(%endpoint, id, "IPC: inclusion approved");
                         serde_json::json!({"success": true})
                     }
                     None => {
-                        warn!(id, "IPC: execute include — device not found or already approved");
+                        warn!(id, "IPC: execute include — device not found");
                         serde_json::json!({"success": false})
                     }
                 },
