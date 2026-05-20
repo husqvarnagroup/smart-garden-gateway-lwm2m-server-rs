@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let (coap_dispatch_tx, coap_dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
+    let coap_dispatch_tx_ipc = coap_dispatch_tx.clone();
 
     {
         let cancel = cancel.clone();
@@ -60,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
             bootstrap_registry,
             coap_dispatch_tx,
             event_sender.clone(),
-            ipso,
+            ipso.clone(),
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap server: {e}"))? }
 
@@ -73,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         ) => { r.map_err(|e| anyhow::anyhow!("coap dispatch: {e}"))? }
 
         r = housekeeping::run(
-            registry,
+            registry.clone(),
             bootstrap_registry_hk,
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("housekeeping: {e}"))? }
@@ -81,6 +82,9 @@ async fn main() -> anyhow::Result<()> {
         r = ipc::run(
             PathBuf::from(ipc::DEFAULT_SOCKET_PATH),
             bootstrap_registry_ipc,
+            registry,
+            ipso,
+            coap_dispatch_tx_ipc,
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("ipc: {e}"))? }
 

@@ -39,6 +39,7 @@ pub enum LwM2mCommand {
 #[serde(rename_all = "camelCase")]
 pub enum ResourceValue {
     Text(String),
+    CoapResponse { class: u8, detail: u8 },
 }
 
 #[derive(Debug, Clone, Serialize)]

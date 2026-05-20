@@ -92,6 +92,25 @@ impl IpsoModel {
         self.get_versioned(object_id, None)
     }
 
+    /// Find the numeric object ID for a given snake_case object name.
+    /// Scans all versions; returns the first match.
+    pub fn object_id_by_name(&self, name: &str) -> Option<u32> {
+        self.objects
+            .iter()
+            .find(|(_, versions)| versions.values().any(|def| def.name == name))
+            .map(|(&id, _)| id)
+    }
+
+    /// Find the numeric resource ID for a resource name within a given object,
+    /// using the version resolution order of `get_versioned`.
+    pub fn resource_id_by_name(&self, object_id: u32, resource_name: &str, version: Option<&str>) -> Option<u32> {
+        let def = self.get_versioned(object_id, version)?;
+        def.resources
+            .iter()
+            .find(|(_, r)| r.name == resource_name)
+            .map(|(&id, _)| id)
+    }
+
     pub fn object_count(&self) -> usize {
         self.objects.values().map(|v| v.len()).sum()
     }
@@ -153,17 +172,17 @@ fn parse_xml_str(xml: &str) -> Option<(u32, String, ObjectDef)> {
                 let name_bytes = e.name();
                 let tag = std::str::from_utf8(name_bytes.as_ref()).unwrap_or("");
                 if tag == "Item" {
-                    if let (Some(id), Some(name), Some(rt)) =
-                        (cur_res_id, cur_res_name.take(), cur_res_type.take())
-                    {
+                    if let (Some(id), Some(name)) = (cur_res_id, cur_res_name.take()) {
                         resources.insert(
                             id,
                             ResourceDef {
                                 name: to_snake_case(&name),
-                                resource_type: rt,
+                                resource_type: cur_res_type.take().unwrap_or(ResourceType::Integer),
                                 multiple_instances: cur_res_multiple,
                             },
                         );
+                    } else {
+                        cur_res_type = None;
                     }
                     cur_res_id = None;
                 } else if tag == "Resources" {
@@ -236,29 +255,37 @@ fn parse_resource_type(s: &str) -> ResourceType {
 /// - CamelCase object names: `IrrigationControl`  → `irrigation_control`
 /// - Title-case resource names: `Available Power Sources` → `available_power_sources`
 /// - Acronyms: `UTC Offset` → `utc_offset`, `SMNC` → `smnc`
+/// - Acronym followed by word: `MeasureRFLink` → `measure_rf_link`
 ///
-/// Rule: insert `_` before an uppercase letter **only** when the immediately
-/// preceding character was lowercase.  Spaces and hyphens become `_`.
+/// Insert `_` before uppercase X when:
+///   (a) previous char was lowercase, OR
+///   (b) previous char was uppercase AND next char is lowercase (end of acronym run)
 fn to_snake_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
+    let chars: Vec<char> = s.chars().collect();
     let mut prev_lower = false;
-    for ch in s.chars() {
+    let mut prev_upper = false;
+    for (i, &ch) in chars.iter().enumerate() {
         if ch == ' ' || ch == '-' {
             if !out.is_empty() && !out.ends_with('_') {
                 out.push('_');
             }
             prev_lower = false;
+            prev_upper = false;
         } else if ch.is_uppercase() {
-            if prev_lower {
+            let next_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
+            if prev_lower || (prev_upper && next_lower) {
                 out.push('_');
             }
             for c in ch.to_lowercase() {
                 out.push(c);
             }
             prev_lower = false;
+            prev_upper = true;
         } else {
             out.push(ch);
             prev_lower = ch.is_lowercase();
+            prev_upper = false;
         }
     }
     out
@@ -310,6 +337,36 @@ mod tests {
         assert!(!res.multiple_instances);
     }
 
+    const SG_COMMON_FRAGMENT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<LWM2M xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.openmobilealliance.org/tech/profiles/LWM2M-v1_1.xsd">
+    <Object ObjectType="MODefinition">
+        <Name>SG Common</Name>
+        <ObjectID>28183</ObjectID>
+        <ObjectURN>urn:oma:lwm2m:x:28183:0.1</ObjectURN>
+        <ObjectVersion>0.1</ObjectVersion>
+        <MultipleInstances>Single</MultipleInstances>
+        <Mandatory>Optional</Mandatory>
+        <Resources>
+            <Item ID="33">
+                <Name>measure_rf_link</Name>
+                <Operations>E</Operations>
+                <MultipleInstances>Single</MultipleInstances>
+                <Mandatory>Mandatory</Mandatory>
+                <Type></Type>
+            </Item>
+        </Resources>
+    </Object>
+</LWM2M>"#;
+
+    #[test]
+    fn parse_execute_resource_empty_type() {
+        let (id, _, obj) = parse_xml_str(SG_COMMON_FRAGMENT).expect("parse");
+        assert_eq!(id, 28183);
+        assert_eq!(obj.name, "sg_common");
+        let res = obj.resources.get(&33).expect("resource 33");
+        assert_eq!(res.name, "measure_rf_link");
+    }
+
     #[test]
     fn snake_case_conversion() {
         // CamelCase object names
@@ -328,5 +385,8 @@ mod tests {
         assert_eq!(to_snake_case("SMNC"), "smnc");
         assert_eq!(to_snake_case("Cell ID"), "cell_id");
         assert_eq!(to_snake_case("LAC"), "lac");
+        // Acronym run followed by a new word: last uppercase of run gets underscore
+        assert_eq!(to_snake_case("MeasureRFLink"), "measure_rf_link");
+        assert_eq!(to_snake_case("SGCommon"), "sg_common");
     }
 }

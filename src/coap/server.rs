@@ -743,17 +743,44 @@ fn build_post_bs(mid: u16, token: &[u8]) -> Result<Vec<u8>> {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn coap_response_to_result(packet: &Packet) -> crate::model::LwM2mResult {
-    use coap_lite::ResponseType::*;
     match packet.header.code {
         MessageClass::Response(status) => {
-            if matches!(status, Created | Deleted | Valid | Changed | Content) {
-                let text = String::from_utf8_lossy(&packet.payload).into_owned();
-                Ok(ResourceValue::Text(text))
+            let (class, detail) = response_type_to_class_detail(status);
+            if class == 2 {
+                Ok(ResourceValue::CoapResponse { class, detail })
             } else {
-                Err(LwM2mError::NotFound)
+                Err(LwM2mError::CoapError { class, detail })
             }
         }
         _ => Err(LwM2mError::CoapError { class: 5, detail: 0 }),
+    }
+}
+
+fn response_type_to_class_detail(status: coap_lite::ResponseType) -> (u8, u8) {
+    use coap_lite::ResponseType::*;
+    match status {
+        Created => (2, 1),
+        Deleted => (2, 2),
+        Valid => (2, 3),
+        Changed => (2, 4),
+        Content => (2, 5),
+        BadRequest => (4, 0),
+        Unauthorized => (4, 1),
+        BadOption => (4, 2),
+        Forbidden => (4, 3),
+        NotFound => (4, 4),
+        MethodNotAllowed => (4, 5),
+        NotAcceptable => (4, 6),
+        PreconditionFailed => (4, 12),
+        RequestEntityTooLarge => (4, 13),
+        UnsupportedContentFormat => (4, 15),
+        InternalServerError => (5, 0),
+        NotImplemented => (5, 1),
+        BadGateway => (5, 2),
+        ServiceUnavailable => (5, 3),
+        GatewayTimeout => (5, 4),
+        ProxyingNotSupported => (5, 5),
+        _ => (5, 0),
     }
 }
 

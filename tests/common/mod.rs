@@ -50,6 +50,7 @@ impl TestGateway {
         );
         let event_sender = EventSender::new();
         let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
+        let dispatch_tx_ipc = dispatch_tx.clone();
         let cancel = CancellationToken::new();
 
         tokio::spawn(coap::server::run(
@@ -73,7 +74,14 @@ impl TestGateway {
             bootstrap_registry.clone(),
             cancel.clone(),
         ));
-        tokio::spawn(ipc::run(ipc_path.clone(), bootstrap_registry.clone(), cancel.clone()));
+        tokio::spawn(ipc::run(
+            ipc_path.clone(),
+            bootstrap_registry.clone(),
+            registry.clone(),
+            Arc::new(IpsoModel::default()),
+            dispatch_tx_ipc,
+            cancel.clone(),
+        ));
         tokio::spawn(event::run(event_path.clone(), event_sender.clone(), cancel.clone()));
 
         // Yield to let tasks reach their accept/recv loops.

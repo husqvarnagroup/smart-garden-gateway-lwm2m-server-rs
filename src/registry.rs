@@ -176,6 +176,14 @@ impl DeviceRegistry {
         Some(inner.by_id[id].endpoint.clone())
     }
 
+    /// Look up a device by endpoint name, returning its address, registry ID, and object versions.
+    pub async fn addr_and_id_by_endpoint(&self, endpoint: &str) -> Option<(SocketAddr, DeviceId, HashMap<u32, String>)> {
+        let inner = self.inner.read().await;
+        let &id = inner.by_endpoint.get(endpoint)?;
+        let dev = &inner.by_id[&id];
+        Some((dev.addr, id, dev.object_versions.clone()))
+    }
+
     /// Return the object versions registered for the device at this address.
     pub async fn object_versions_by_addr(&self, addr: SocketAddr) -> Option<HashMap<u32, String>> {
         let inner = self.inner.read().await;
