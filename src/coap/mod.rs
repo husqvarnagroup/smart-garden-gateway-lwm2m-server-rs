@@ -63,8 +63,6 @@ pub mod content_format {
     pub const SENML_CBOR: u16 = 112;
 }
 
-/// LWM2M registration path prefix.
-pub const RD_PATH: &str = "rd";
 
 /// Extract the bare SGTIN from a CoAP `ep` parameter that may carry a full URN.
 ///

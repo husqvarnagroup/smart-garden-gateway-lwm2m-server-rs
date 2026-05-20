@@ -16,10 +16,11 @@ use crate::{
     registry::DeviceRegistry,
 };
 
-use super::{content_format::SENML_CBOR, set_tclass, RD_PATH, TC_ENCRYPTED, TC_PLAIN};
+use super::{content_format::SENML_CBOR, set_tclass, TC_ENCRYPTED, TC_PLAIN};
 
 const BS_PATH: &str = "bs";
 const DP_PATH: &str = "dp";
+const RD_PATH: &str = "rd";
 const MAX_PACKET: usize = 1500;
 /// RFC 7252 retransmit defaults: up to 4 re-sends, 2 s initial backoff.
 const MAX_RETRANSMIT: u8 = 4;
