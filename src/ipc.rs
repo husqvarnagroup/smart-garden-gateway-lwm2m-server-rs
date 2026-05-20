@@ -114,6 +114,7 @@ async fn handle_request(
 
         _ => {
             warn!(op, path, "IPC: unhandled request");
+            tracing::debug!(payload = %req, "IPC: unhandled request payload");
             serde_json::json!({"success": true})
         }
     }
