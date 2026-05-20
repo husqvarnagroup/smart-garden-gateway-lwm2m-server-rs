@@ -21,6 +21,12 @@ pub struct DeviceRegistry {
     inner: Arc<RwLock<RegistryInner>>,
 }
 
+impl Default for DeviceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeviceRegistry {
     pub fn new() -> Self {
         Self {

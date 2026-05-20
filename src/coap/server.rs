@@ -16,14 +16,10 @@ use crate::{
     registry::DeviceRegistry,
 };
 
-use super::{content_format::SENML_CBOR, RD_PATH};
+use super::{content_format::SENML_CBOR, set_tclass, RD_PATH, TC_ENCRYPTED, TC_PLAIN};
 
 const BS_PATH: &str = "bs";
 const DP_PATH: &str = "dp";
-/// IPv6 Traffic Class used for all post-bootstrap server traffic.
-/// Tells the radio module to apply MAC-layer encryption.
-#[cfg(target_os = "linux")]
-const TC_ENCRYPTED: u32 = 0x1c;
 const MAX_PACKET: usize = 1500;
 /// RFC 7252 retransmit defaults: up to 4 re-sends, 2 s initial backoff.
 const MAX_RETRANSMIT: u8 = 4;
@@ -49,18 +45,15 @@ pub async fn run(
                 match result {
                     Ok((len, addr)) => {
                         info!(%addr, bytes = len, "CoAP packet received");
-                        if let Err(e) = handle_packet(
-                            &buf[..len],
-                            addr,
-                            &socket,
-                            &registry,
-                            &bootstrap_registry,
-                            &coap_dispatch_tx,
-                            &event_sender,
-                            &ipso,
-                        )
-                        .await
-                        {
+                        let ctx = ServerCtx {
+                            socket: &socket,
+                            registry: &registry,
+                            bootstrap_registry: &bootstrap_registry,
+                            coap_dispatch_tx: &coap_dispatch_tx,
+                            event_sender: &event_sender,
+                            ipso: &ipso,
+                        };
+                        if let Err(e) = handle_packet(&buf[..len], addr, &ctx).await {
                             warn!(%addr, "error handling CoAP packet: {e}");
                         }
                     }
@@ -77,27 +70,28 @@ pub struct DispatchRequest {
     pub ops: Vec<PendingOperation>,
 }
 
-async fn handle_packet(
-    data: &[u8],
-    addr: SocketAddr,
-    socket: &Arc<UdpSocket>,
-    registry: &DeviceRegistry,
-    bootstrap_registry: &BootstrapRegistry,
-    coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
-    event_sender: &EventSender,
-    ipso: &Arc<IpsoModel>,
-) -> Result<()> {
+/// Shared server state threaded through packet handlers.
+struct ServerCtx<'a> {
+    socket: &'a Arc<UdpSocket>,
+    registry: &'a DeviceRegistry,
+    bootstrap_registry: &'a BootstrapRegistry,
+    coap_dispatch_tx: &'a mpsc::Sender<DispatchRequest>,
+    event_sender: &'a EventSender,
+    ipso: &'a Arc<IpsoModel>,
+}
+
+async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
     let packet = Packet::from_bytes(data)
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
 
-    registry.touch(addr).await;
+    ctx.registry.touch(addr).await;
 
     match packet.header.get_type() {
         // Device initiating a request to the server (registration, update).
         MessageType::Confirmable | MessageType::NonConfirmable => {
             match packet.header.code {
                 MessageClass::Request(Method::Post) => {
-                    handle_post(packet, addr, socket, registry, bootstrap_registry, coap_dispatch_tx, event_sender, ipso).await?;
+                    handle_post(packet, addr, ctx).await?;
                 }
                 other => {
                     warn!(%addr, ?other, "unexpected CoAP request method");
@@ -106,16 +100,16 @@ async fn handle_packet(
         }
         // Device acknowledging one of our downlink requests.
         MessageType::Acknowledgement => {
-            handle_ack(packet, addr, registry, bootstrap_registry).await?;
+            handle_ack(packet, addr, ctx.registry, ctx.bootstrap_registry).await?;
         }
         MessageType::Reset => {
             // Device rejected our message — treat as error for the in-flight op.
             let token = token_array(packet.get_token());
-            if bootstrap_registry.is_pending(&token).await {
+            if ctx.bootstrap_registry.is_pending(&token).await {
                 warn!(%addr, "bootstrap GET /0/0 reset by device");
-            } else if bootstrap_registry.complete_write_ack(&token, false).await {
+            } else if ctx.bootstrap_registry.complete_write_ack(&token, false).await {
                 warn!(%addr, "bootstrap write op reset by device");
-            } else if let Some(op) = registry.complete_in_flight(addr, &token).await {
+            } else if let Some(op) = ctx.registry.complete_in_flight(addr, &token).await {
                 let _ = op.response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
             }
         }
@@ -123,39 +117,30 @@ async fn handle_packet(
     Ok(())
 }
 
-async fn handle_post(
-    packet: Packet,
-    addr: SocketAddr,
-    socket: &Arc<UdpSocket>,
-    registry: &DeviceRegistry,
-    bootstrap_registry: &BootstrapRegistry,
-    coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
-    event_sender: &EventSender,
-    ipso: &Arc<IpsoModel>,
-) -> Result<()> {
+async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
     let path = uri_path(&packet);
     let path_parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
 
     match path_parts.as_slice() {
         // POST /bs?ep=<name>&pct=<fmt>  — bootstrap request
         [p] if *p == BS_PATH => {
-            handle_bootstrap(packet, addr, socket, bootstrap_registry, event_sender).await?;
+            handle_bootstrap(packet, addr, ctx.socket, ctx.bootstrap_registry, ctx.event_sender).await?;
         }
         // POST /rd?ep=<name>&lt=<lifetime>&b=U  — new registration
         [p] if *p == RD_PATH => {
-            handle_registration(packet, addr, socket, registry).await?;
+            handle_registration(packet, addr, ctx.socket, ctx.registry).await?;
         }
         // POST /rd/<id>  — registration update (heartbeat)
         [p, _id] if *p == RD_PATH => {
-            handle_update(packet, addr, socket, registry, coap_dispatch_tx).await?;
+            handle_update(packet, addr, ctx.socket, ctx.registry, ctx.coap_dispatch_tx).await?;
         }
         // POST /dp  — device data push (SenML+CBOR state report after registration)
         [p] if *p == DP_PATH => {
-            handle_dp(packet, addr, socket, registry, event_sender, ipso).await?;
+            handle_dp(packet, addr, ctx.socket, ctx.registry, ctx.event_sender, ctx.ipso).await?;
         }
         _ => {
             warn!(%addr, path, "POST to unknown path");
-            send_response(socket, addr, &packet, Status::NotFound, None).await?;
+            send_encrypted_response(ctx.socket, addr, &packet, Status::NotFound, None).await?;
         }
     }
     Ok(())
@@ -175,7 +160,8 @@ async fn handle_bootstrap(
     let endpoint = super::sgtin_from_ep(ep_raw).to_owned();
     if endpoint.is_empty() {
         warn!(%addr, "bootstrap request missing ep parameter");
-        send_response(socket, addr, &packet, Status::BadRequest, None).await?;
+        let bytes = make_response_bytes(&packet, Status::BadRequest, None)?;
+        send_bootstrap_packet(socket, &bytes, addr).await?;
         return Ok(());
     }
 
@@ -253,40 +239,17 @@ fn make_response_bytes(request: &Packet, status: Status, payload: Option<Vec<u8>
     response.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
 }
 
-/// Send a bootstrap-phase CoAP packet with IPv6 Traffic Class 0x0c.
-/// TC=0x0c tells the radio module not to apply MAC-layer encryption,
-/// which is required before the network key has been exchanged.
-/// On macOS (dev builds) TC is not settable; the warning is expected.
+/// Send a bootstrap-phase CoAP packet (TC=0x0c — no MAC-layer encryption).
 async fn send_bootstrap_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAddr) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use socket2::SockRef;
-        SockRef::from(socket).set_tclass_v6(0x0c)?;
-    }
+    set_tclass(socket, TC_PLAIN);
     socket.send_to(bytes, addr).await?;
-    #[cfg(target_os = "linux")]
-    {
-        use socket2::SockRef;
-        SockRef::from(socket).set_tclass_v6(0)?;
-    }
     Ok(())
 }
 
-/// Send a post-bootstrap CoAP packet with IPv6 Traffic Class 0x1c.
-/// TC=0x1c tells the radio module to apply MAC-layer encryption,
-/// required for all traffic after the network key has been provisioned.
+/// Send a post-bootstrap CoAP packet (TC=0x1c — MAC-layer encryption active).
 async fn send_encrypted_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAddr) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use socket2::SockRef;
-        SockRef::from(socket).set_tclass_v6(TC_ENCRYPTED)?;
-    }
+    set_tclass(socket, TC_ENCRYPTED);
     socket.send_to(bytes, addr).await?;
-    #[cfg(target_os = "linux")]
-    {
-        use socket2::SockRef;
-        SockRef::from(socket).set_tclass_v6(0)?;
-    }
     Ok(())
 }
 
@@ -431,6 +394,11 @@ async fn handle_dp(
 
 // ── SenML+CBOR → event payload ────────────────────────────────────────────────
 
+type RawPayload = std::collections::BTreeMap<
+    u32,
+    std::collections::BTreeMap<u32, std::collections::BTreeMap<u32, (Vec<SenmlValue>, bool)>>,
+>;
+
 enum SenmlValue {
     Int(i64),
     Float(f64),
@@ -448,7 +416,6 @@ fn build_device_payload(
     obj_versions: &std::collections::HashMap<u32, String>,
 ) -> Option<serde_json::Value> {
     use ciborium::value::Value as Cbor;
-    use std::collections::BTreeMap;
 
     let top: Cbor = match ciborium::from_reader(data) {
         Ok(v) => v,
@@ -469,7 +436,7 @@ fn build_device_payload(
     // obj_id → inst_id → res_id → (values, is_array)
     // is_array = true when the SenML path included a resource-instance segment OR
     // when the IPSO definition marks the resource as MultipleInstances.
-    let mut raw: BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, (Vec<SenmlValue>, bool)>>> = BTreeMap::new();
+    let mut raw: RawPayload = RawPayload::new();
 
     for record in &records {
         let Cbor::Map(fields) = record else { continue };
@@ -559,7 +526,7 @@ fn parse_lwm2m_path(path: &str) -> Option<(u32, u32, u32, bool)> {
     let obj:  u32 = parts.next()?.parse().ok()?;
     let inst: u32 = parts.next()?.parse().ok()?;
     let res:  u32 = parts.next()?.parse().ok()?;
-    let has_res_inst = parts.next().map_or(false, |p| p.parse::<u32>().is_ok());
+    let has_res_inst = parts.next().is_some_and(|p| p.parse::<u32>().is_ok());
     Some((obj, inst, res, has_res_inst))
 }
 
@@ -795,23 +762,6 @@ fn make_response(request: &Packet, status: Status) -> Packet {
     response
 }
 
-async fn send_response(
-    socket: &UdpSocket,
-    addr: SocketAddr,
-    request: &Packet,
-    status: Status,
-    payload: Option<Vec<u8>>,
-) -> Result<()> {
-    let mut response = make_response(request, status);
-    if let Some(body) = payload {
-        response.payload = body;
-    }
-    let bytes = response
-        .to_bytes()
-        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
-    socket.send_to(&bytes, addr).await?;
-    Ok(())
-}
 
 fn uri_path(packet: &Packet) -> String {
     packet

@@ -21,6 +21,12 @@ pub struct EventSender {
     seq: Arc<AtomicU32>,
 }
 
+impl Default for EventSender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventSender {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(256);

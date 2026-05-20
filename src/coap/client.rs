@@ -13,7 +13,7 @@ use crate::{
     registry::DeviceRegistry,
 };
 
-use super::server::DispatchRequest;
+use super::{server::DispatchRequest, set_tclass, TC_ENCRYPTED};
 
 /// CoAP retransmission constants (RFC 7252 defaults).
 const ACK_TIMEOUT_MS: u64 = 2_000;
@@ -87,6 +87,7 @@ async fn dispatch_op(
         let mut attempts = 0u8;
 
         loop {
+            set_tclass(&socket, TC_ENCRYPTED);
             if let Err(e) = socket.send_to(&bytes, addr).await {
                 warn!(%addr, "send_to failed: {e}");
                 break;

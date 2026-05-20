@@ -8,6 +8,27 @@ use tracing::info;
 
 use crate::error::Result;
 
+/// IPv6 Traffic Class: no MAC-layer encryption (bootstrap phase).
+pub const TC_PLAIN: u32 = 0x0c;
+/// IPv6 Traffic Class: MAC-layer encryption active (post-bootstrap).
+pub const TC_ENCRYPTED: u32 = 0x1c;
+
+/// Set the IPv6 Traffic Class on the socket before a send.
+///
+/// On Linux this controls MAC-layer encryption in the radio module.
+/// On other platforms (macOS dev builds) the call is a no-op.
+pub fn set_tclass(socket: &UdpSocket, tc: u32) {
+    #[cfg(target_os = "linux")]
+    {
+        use socket2::SockRef;
+        if let Err(e) = SockRef::from(socket).set_tclass_v6(tc) {
+            tracing::warn!(tc, "set_tclass_v6 failed: {e}");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (socket, tc);
+}
+
 pub async fn bind(addr: SocketAddr, interface: Option<&str>) -> Result<Arc<UdpSocket>> {
     use socket2::{Domain, Protocol, Socket, Type};
 
