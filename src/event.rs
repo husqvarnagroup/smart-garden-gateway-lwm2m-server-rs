@@ -74,6 +74,22 @@ impl EventSender {
         let _ = self.tx.send(format!("{msg}\n"));
     }
 
+    /// Emit a `connection_status` event for a registered device.
+    pub fn send_connection_status(&self, endpoint: &str, online: bool) {
+        let ts = unix_ts();
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let msg = serde_json::json!([{
+            "op": "update",
+            "entity": {"device": endpoint, "path": "connection_status"},
+            "payload": {
+                "_urn": "urn:oma:lwm2m:x:28171",
+                "0": {"online": {"vb": online, "ts": ts}}
+            },
+            "metadata": {"source": "lwm2mserver", "sequence": seq}
+        }]);
+        let _ = self.tx.send(format!("{msg}\n"));
+    }
+
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<String> {
         self.tx.subscribe()
     }

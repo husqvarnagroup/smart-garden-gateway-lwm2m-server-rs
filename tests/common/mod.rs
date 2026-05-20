@@ -65,6 +65,7 @@ impl TestGateway {
             socket,
             registry.clone(),
             dispatch_rx,
+            event_sender.clone(),
             cancel.clone(),
         ));
         tokio::spawn(housekeeping::run(

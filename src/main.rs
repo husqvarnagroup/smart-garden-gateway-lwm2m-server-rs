@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
             socket,
             registry.clone(),
             coap_dispatch_rx,
+            event_sender.clone(),
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap dispatch: {e}"))? }
 

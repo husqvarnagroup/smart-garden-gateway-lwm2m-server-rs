@@ -79,6 +79,8 @@ pub struct Device {
     pub objects: Vec<String>,
     /// Object versions from the link-format `ver` attribute, keyed by object id.
     pub object_versions: HashMap<u32, String>,
+    /// None = unknown, Some(true) = online, Some(false) = offline.
+    pub online: Option<bool>,
     /// Operations waiting to be sent on next device contact.
     pub pending_ops: VecDeque<PendingOperation>,
     /// Operations sent but awaiting CoAP ACK, keyed by 8-byte token.
@@ -104,6 +106,7 @@ impl Device {
             last_contact: now,
             objects,
             object_versions,
+            online: Some(true),
             pending_ops: VecDeque::new(),
             in_flight: HashMap::new(),
         }

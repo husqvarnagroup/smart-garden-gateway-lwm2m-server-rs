@@ -82,14 +82,31 @@ impl DeviceRegistry {
         id
     }
 
-    /// Update last-contact timestamp and address (called on any inbound CoAP).
-    pub async fn touch(&self, addr: SocketAddr) {
+    /// Update last-contact timestamp. Returns the endpoint if the device just came online.
+    pub async fn touch(&self, addr: SocketAddr) -> Option<String> {
         let mut inner = self.inner.write().await;
-        if let Some(&id) = inner.by_addr.get(&addr) {
-            let dev = inner.by_id.get_mut(&id).unwrap();
-            dev.last_contact = std::time::Instant::now();
-            // addr won't differ here since we looked up by addr, but guard for safety.
-            dev.addr = addr;
+        let id = *inner.by_addr.get(&addr)?;
+        let dev = inner.by_id.get_mut(&id).unwrap();
+        dev.last_contact = std::time::Instant::now();
+        dev.addr = addr;
+        if dev.online != Some(true) {
+            dev.online = Some(true);
+            Some(dev.endpoint.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Mark device offline. Returns the endpoint if it was previously online.
+    pub async fn set_device_offline(&self, addr: SocketAddr) -> Option<String> {
+        let mut inner = self.inner.write().await;
+        let id = *inner.by_addr.get(&addr)?;
+        let dev = inner.by_id.get_mut(&id)?;
+        if dev.online == Some(true) {
+            dev.online = Some(false);
+            Some(dev.endpoint.clone())
+        } else {
+            None
         }
     }
 

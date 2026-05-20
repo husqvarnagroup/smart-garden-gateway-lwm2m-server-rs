@@ -85,7 +85,9 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
     let packet = Packet::from_bytes(data)
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
 
-    ctx.registry.touch(addr).await;
+    if let Some(endpoint) = ctx.registry.touch(addr).await {
+        ctx.event_sender.send_connection_status(&endpoint, true);
+    }
 
     match packet.header.get_type() {
         // Device initiating a request to the server (registration, update).
@@ -190,6 +192,7 @@ async fn handle_bootstrap(
             es.send_includable(id, &ep, true, false);
             match bootstrap_write_phase(ep.clone(), addr, socket_c, br.clone(), server_uri).await {
                 Ok(()) => {
+                    es.send_connection_status(&ep, true);
                     es.send_includable(id, &ep, true, true);
                     br.remove_includable_id(&ep).await;
                     info!(endpoint = %ep, "inclusion completed");

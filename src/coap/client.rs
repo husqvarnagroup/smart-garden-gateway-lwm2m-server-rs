@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 use crate::{
     error::Result,
+    event::EventSender,
     model::{LwM2mCommand, LwM2mError, PendingOperation},
     registry::DeviceRegistry,
 };
@@ -23,6 +24,7 @@ pub async fn run(
     socket: Arc<UdpSocket>,
     registry: DeviceRegistry,
     mut dispatch_rx: mpsc::Receiver<DispatchRequest>,
+    event_sender: EventSender,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut mid_counter: u16 = 1;
@@ -35,7 +37,7 @@ pub async fn run(
             }
             Some(req) = dispatch_rx.recv() => {
                 for op in req.ops {
-                    dispatch_op(&socket, &registry, req.addr, op, &mut mid_counter).await;
+                    dispatch_op(&socket, &registry, req.addr, op, &mut mid_counter, &event_sender).await;
                 }
             }
         }
@@ -48,6 +50,7 @@ async fn dispatch_op(
     addr: SocketAddr,
     mut op: PendingOperation,
     mid_counter: &mut u16,
+    event_sender: &EventSender,
 ) {
     // CoAP token: 8 bytes, lower 4 bytes = op id (u32), upper 4 bytes zero.
     // AtomicU64 is unavailable on 32-bit ARM, so op ids are u32.
@@ -82,6 +85,7 @@ async fn dispatch_op(
     // Send with retransmit loop (Confirmable).
     let socket = socket.clone();
     let registry = registry.clone();
+    let event_sender = event_sender.clone();
     tokio::spawn(async move {
         let mut timeout_ms = ACK_TIMEOUT_MS;
         let mut attempts = 0u8;
@@ -90,6 +94,9 @@ async fn dispatch_op(
             set_tclass(&socket, TC_ENCRYPTED);
             if let Err(e) = socket.send_to(&bytes, addr).await {
                 warn!(%addr, "send_to failed: {e}");
+                if let Some(endpoint) = registry.set_device_offline(addr).await {
+                    event_sender.send_connection_status(&endpoint, false);
+                }
                 break;
             }
             debug!(%addr, ?token, "CoAP CON sent (attempt {})", attempts + 1);
@@ -108,6 +115,9 @@ async fn dispatch_op(
                 if let Some(op) = registry.complete_in_flight(addr, &token).await {
                     warn!(%addr, op_id = op.id, "CoAP retransmit exhausted, timing out op");
                     let _ = op.response_tx.send(Err(LwM2mError::Timeout));
+                }
+                if let Some(endpoint) = registry.set_device_offline(addr).await {
+                    event_sender.send_connection_status(&endpoint, false);
                 }
                 return;
             }
