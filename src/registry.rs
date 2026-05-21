@@ -149,6 +149,13 @@ impl DeviceRegistry {
         }
     }
 
+    /// Return true if an in-flight operation with this token is still pending (non-destructive).
+    pub async fn is_in_flight(&self, addr: SocketAddr, token: &[u8; 8]) -> bool {
+        let inner = self.inner.read().await;
+        let Some(id) = inner.by_addr.get(&addr) else { return false; };
+        inner.by_id[id].in_flight.contains_key(token)
+    }
+
     /// Remove an in-flight operation by token (CoAP response received).
     /// Returns the op so the caller can fire its response channel.
     pub async fn complete_in_flight(&self, addr: SocketAddr, token: &[u8; 8]) -> Option<PendingOperation> {
@@ -294,6 +301,13 @@ impl DeviceRegistry {
         let dev = inner.by_id.get_mut(&id).unwrap();
         json_merge(&mut dev.state, new_state);
         dev.state.clone()
+    }
+
+    /// Return the accumulated IPSO state for a device identified by endpoint name.
+    pub async fn device_state_by_endpoint(&self, endpoint: &str) -> Option<serde_json::Value> {
+        let inner = self.inner.read().await;
+        let &id = inner.by_endpoint.get(endpoint)?;
+        Some(inner.by_id[&id].state.clone())
     }
 
     /// Restore persisted IPSO state for a device identified by endpoint name.

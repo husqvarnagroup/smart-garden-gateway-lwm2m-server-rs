@@ -107,8 +107,15 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
     match op {
         "read" => match path {
             "devices" => {
-                info!("IPC: read devices → [] (no registered devices)");
-                serde_json::json!({"payload": {}, "success": true})
+                let included = ctx.bootstrap_registry.included_list().await;
+                let mut payload = serde_json::Map::new();
+                for ep in &included {
+                    let state = ctx.registry.device_state_by_endpoint(ep).await
+                        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                    payload.insert(ep.clone(), state);
+                }
+                info!(count = included.len(), "IPC: read devices");
+                serde_json::json!({"payload": payload, "success": true})
             }
             _ => {
                 warn!(op, path, "IPC: unhandled read path");

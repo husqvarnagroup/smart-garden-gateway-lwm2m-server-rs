@@ -18,7 +18,7 @@ use super::{server::DispatchRequest, set_tclass, TC_ENCRYPTED};
 
 /// CoAP retransmission constants (RFC 7252 defaults).
 const ACK_TIMEOUT_MS: u64 = 2_000;
-const MAX_RETRANSMIT: u8 = 4;
+const MAX_RETRANSMIT: u8 = 3;
 
 pub async fn run(
     socket: Arc<UdpSocket>,
@@ -104,7 +104,7 @@ async fn dispatch_op(
             sleep(Duration::from_millis(timeout_ms)).await;
 
             // Check if the op was already completed (ACK received).
-            if registry.complete_in_flight(addr, &token).await.is_none() {
+            if !registry.is_in_flight(addr, &token).await {
                 // Already acked — nothing more to do.
                 return;
             }
