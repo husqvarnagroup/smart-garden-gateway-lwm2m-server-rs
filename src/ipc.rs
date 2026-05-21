@@ -151,6 +151,11 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
             handle_execute_path(path, device, ctx).await
         }
 
+        "write" if !path.is_empty() => {
+            let device = req["entity"]["device"].as_str().unwrap_or("");
+            handle_write_path(path, device, &req["payload"], ctx).await
+        }
+
         _ => {
             warn!(op, path, "IPC: unhandled request");
             tracing::debug!(payload = %req, "IPC: unhandled request payload");
@@ -159,66 +164,79 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
     }
 }
 
-async fn handle_execute_path(path: &str, device: &str, ctx: &IpcCtx) -> serde_json::Value {
-    // path = "object_name/instance_id/resource_name"
+struct ResolvedResource {
+    addr: std::net::SocketAddr,
+    dev_id: crate::model::DeviceId,
+    obj_id: u32,
+    inst_id: u16,
+    res_id: u32,
+}
+
+async fn resolve_resource(path: &str, device: &str, op: &str, ctx: &IpcCtx) -> Option<ResolvedResource> {
     let parts: Vec<&str> = path.splitn(3, '/').collect();
     let (obj_name, inst_str, res_name) = match parts.as_slice() {
         [a, b, c] => (*a, *b, *c),
         _ => {
-            warn!(path, "IPC execute: path must be object/instance/resource");
-            return serde_json::json!({"success": false});
+            warn!(path, "IPC {op}: path must be object/instance/resource");
+            return None;
         }
     };
 
     let inst_id: u16 = match inst_str.parse() {
         Ok(v) => v,
         Err(_) => {
-            warn!(path, "IPC execute: invalid instance id");
-            return serde_json::json!({"success": false});
+            warn!(path, "IPC {op}: invalid instance id");
+            return None;
         }
     };
 
     let Some(obj_id) = ctx.ipso.object_id_by_name(obj_name) else {
-        warn!(path, obj_name, "IPC execute: unknown object name");
-        return serde_json::json!({"success": false});
+        warn!(path, obj_name, "IPC {op}: unknown object name");
+        return None;
     };
 
     let Some((addr, dev_id, versions)) = ctx.registry.addr_and_id_by_endpoint(device).await else {
-        warn!(device, "IPC execute: device not found");
-        return serde_json::json!({"success": false});
+        warn!(device, "IPC {op}: device not found");
+        return None;
     };
 
     let ver = versions.get(&obj_id).map(String::as_str);
     let Some(res_id) = ctx.ipso.resource_id_by_name(obj_id, res_name, ver) else {
-        warn!(path, res_name, "IPC execute: unknown resource name");
-        return serde_json::json!({"success": false});
+        warn!(path, res_name, "IPC {op}: unknown resource name");
+        return None;
     };
 
-    let resource_path = ResourcePath {
-        object_id: obj_id as u16,
-        instance_id: inst_id,
-        resource_id: res_id as u16,
-    };
+    Some(ResolvedResource { addr, dev_id, obj_id, inst_id, res_id })
+}
 
+async fn dispatch_and_await(
+    command: LwM2mCommand,
+    r: &ResolvedResource,
+    op_name: &str,
+    device: &str,
+    path: &str,
+    ctx: &IpcCtx,
+) -> serde_json::Value {
     let (response_tx, response_rx) = oneshot::channel();
     let op = PendingOperation {
         id: NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
-        command: LwM2mCommand::Execute { path: resource_path, args: None },
+        command,
         response_tx,
         created_at: Instant::now(),
         attempts: 0,
     };
 
-    if ctx.dispatch_tx.send(DispatchRequest { addr, ops: vec![op] }).await.is_err() {
-        warn!(device, path, "IPC execute: dispatch channel closed");
+    if ctx.dispatch_tx.send(DispatchRequest { addr: r.addr, ops: vec![op] }).await.is_err() {
+        warn!(device, path, "IPC {op_name}: dispatch channel closed");
         return serde_json::json!({"success": false});
     }
 
+    let (obj_id, inst_id, res_id, dev_id) = (r.obj_id, r.inst_id, r.res_id, r.dev_id);
     match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
         Ok(Ok(Ok(ResourceValue::CoapResponse { class, detail }))) => {
             let code = (class as u16) * 32 + detail as u16;
             let name = coap_status_name(class, detail);
-            info!(device, path, "IPC execute: {name}");
+            info!(device, path, "IPC {op_name}: {name}");
             serde_json::json!({
                 "metadata": {
                     "lwm2m_client_id": dev_id,
@@ -230,19 +248,74 @@ async fn handle_execute_path(path: &str, device: &str, ctx: &IpcCtx) -> serde_js
             })
         }
         Ok(Ok(Err(e))) => {
-            warn!(device, path, "IPC execute: CoAP error {e:?}");
+            warn!(device, path, "IPC {op_name}: CoAP error {e:?}");
             serde_json::json!({"success": false})
         }
         Ok(Err(_)) => {
-            warn!(device, path, "IPC execute: response channel dropped");
+            warn!(device, path, "IPC {op_name}: response channel dropped");
             serde_json::json!({"success": false})
         }
         Err(_) => {
-            warn!(device, path, "IPC execute: timeout");
+            warn!(device, path, "IPC {op_name}: timeout");
             serde_json::json!({"success": false})
         }
         Ok(Ok(Ok(_))) => serde_json::json!({"success": false}),
     }
+}
+
+async fn handle_execute_path(path: &str, device: &str, ctx: &IpcCtx) -> serde_json::Value {
+    let Some(r) = resolve_resource(path, device, "execute", ctx).await else {
+        return serde_json::json!({"success": false});
+    };
+    let resource_path = ResourcePath {
+        object_id: r.obj_id as u16,
+        instance_id: r.inst_id,
+        resource_id: r.res_id as u16,
+    };
+    let command = LwM2mCommand::Execute { path: resource_path, args: None };
+    dispatch_and_await(command, &r, "execute", device, path, ctx).await
+}
+
+async fn handle_write_path(path: &str, device: &str, write_payload: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Value {
+    let Some(r) = resolve_resource(path, device, "write", ctx).await else {
+        return serde_json::json!({"success": false});
+    };
+    let Some((value, content_format)) = encode_write_payload(write_payload) else {
+        warn!(path, "IPC write: unrecognised payload value");
+        return serde_json::json!({"success": false});
+    };
+    let resource_path = ResourcePath {
+        object_id: r.obj_id as u16,
+        instance_id: r.inst_id,
+        resource_id: r.res_id as u16,
+    };
+    let command = LwM2mCommand::Write { path: resource_path, value, content_format };
+    dispatch_and_await(command, &r, "write", device, path, ctx).await
+}
+
+fn encode_write_payload(payload: &serde_json::Value) -> Option<(Vec<u8>, u16)> {
+    if let Some(s) = payload["vs"].as_str() {
+        return Some((s.as_bytes().to_vec(), 0));
+    }
+    if let Some(i) = payload["vi"].as_i64() {
+        return Some((i.to_string().into_bytes(), 0));
+    }
+    if let Some(f) = payload["vf"].as_f64() {
+        return Some((f.to_string().into_bytes(), 0));
+    }
+    if let Some(b) = payload["vb"].as_bool() {
+        return Some((if b { b"1".to_vec() } else { b"0".to_vec() }, 0));
+    }
+    if let Some(t) = payload["vt"].as_i64() {
+        return Some((t.to_string().into_bytes(), 0));
+    }
+    if let Some(o) = payload["vo"].as_str() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        if let Ok(bytes) = STANDARD.decode(o) {
+            return Some((bytes, 42));
+        }
+    }
+    None
 }
 
 fn coap_status_name(class: u8, detail: u8) -> &'static str {
