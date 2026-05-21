@@ -148,7 +148,7 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
 
         "execute" if !path.is_empty() => {
             let device = req["entity"]["device"].as_str().unwrap_or("");
-            handle_execute_path(path, device, ctx).await
+            handle_execute_path(path, device, &req["payload"], ctx).await
         }
 
         "write" if !path.is_empty() => {
@@ -263,7 +263,7 @@ async fn dispatch_and_await(
     }
 }
 
-async fn handle_execute_path(path: &str, device: &str, ctx: &IpcCtx) -> serde_json::Value {
+async fn handle_execute_path(path: &str, device: &str, exec_payload: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Value {
     let Some(r) = resolve_resource(path, device, "execute", ctx).await else {
         return serde_json::json!({"success": false});
     };
@@ -272,8 +272,19 @@ async fn handle_execute_path(path: &str, device: &str, ctx: &IpcCtx) -> serde_js
         instance_id: r.inst_id,
         resource_id: r.res_id as u16,
     };
-    let command = LwM2mCommand::Execute { path: resource_path, args: None };
+    let command = LwM2mCommand::Execute { path: resource_path, args: execute_args(exec_payload) };
     dispatch_and_await(command, &r, "execute", device, path, ctx).await
+}
+
+fn execute_args(payload: &serde_json::Value) -> Option<Vec<u8>> {
+    let arr = payload["as"].as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    if arr.len() > 1 {
+        warn!("IPC execute: payload has {} args, using first only", arr.len());
+    }
+    arr[0].as_str().map(|s| s.as_bytes().to_vec())
 }
 
 async fn handle_write_path(path: &str, device: &str, write_payload: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Value {
