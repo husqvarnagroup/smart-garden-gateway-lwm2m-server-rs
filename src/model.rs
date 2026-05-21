@@ -95,6 +95,7 @@ pub struct Device {
 }
 
 impl Device {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: DeviceId,
         endpoint: String,

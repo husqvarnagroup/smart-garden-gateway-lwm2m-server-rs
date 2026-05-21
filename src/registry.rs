@@ -55,6 +55,7 @@ impl DeviceRegistry {
 
     /// Register a new device or refresh an existing registration.
     /// Returns the assigned DeviceId.
+    #[allow(clippy::too_many_arguments)]
     pub async fn register(
         &self,
         endpoint: String,

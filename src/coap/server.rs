@@ -27,6 +27,7 @@ const MAX_PACKET: usize = 1500;
 const MAX_RETRANSMIT: u8 = 4;
 const ACK_TIMEOUT_SECS: u64 = 2;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     socket: Arc<UdpSocket>,
     registry: DeviceRegistry,
