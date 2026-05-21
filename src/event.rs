@@ -90,6 +90,17 @@ impl EventSender {
         let _ = self.tx.send(format!("{msg}\n"));
     }
 
+    /// Emit a `delete` event for a device that has self-deregistered (factory reset).
+    pub fn send_device_deleted(&self, endpoint: &str) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let msg = serde_json::json!([{
+            "op": "delete",
+            "entity": {"device": endpoint, "path": ""},
+            "metadata": {"source": "lwm2mserver", "sequence": seq}
+        }]);
+        let _ = self.tx.send(format!("{msg}\n"));
+    }
+
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<String> {
         self.tx.subscribe()
     }

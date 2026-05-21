@@ -289,6 +289,11 @@ impl BootstrapRegistry {
         self.inner.lock().await.included.contains(endpoint)
     }
 
+    /// Remove an endpoint from the included set (e.g. after device factory reset).
+    pub async fn unmark_included(&self, endpoint: &str) {
+        self.inner.lock().await.included.remove(endpoint);
+    }
+
     /// Snapshot the included set for persistence.
     pub async fn included_list(&self) -> Vec<String> {
         self.inner.lock().await.included.iter().cloned().collect()

@@ -100,6 +100,9 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
                 MessageClass::Request(Method::Post) => {
                     handle_post(packet, addr, ctx).await?;
                 }
+                MessageClass::Request(Method::Delete) => {
+                    handle_delete(packet, addr, ctx).await?;
+                }
                 other => {
                     warn!(%addr, ?other, "unexpected CoAP request method");
                 }
@@ -150,6 +153,34 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
             send_encrypted_response(ctx.socket, addr, &packet, Status::NotFound, None).await?;
         }
     }
+    Ok(())
+}
+
+async fn handle_delete(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
+    send_encrypted_response(ctx.socket, addr, &packet, Status::Deleted, None).await?;
+
+    let Some(endpoint) = ctx.registry.remove_by_addr(addr).await else {
+        warn!(%addr, "DELETE from unknown device, ignoring");
+        return Ok(());
+    };
+
+    info!(%endpoint, %addr, "device self-deleted (factory reset)");
+
+    ctx.bootstrap_registry.unmark_included(&endpoint).await;
+    let included = ctx.bootstrap_registry.included_list().await;
+    let snapshots = ctx.registry.snapshot().await;
+    let ps = Arc::clone(ctx.persistence);
+    let ep = endpoint.clone();
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            ps.save_registry(&snapshots);
+            ps.save_included(&included);
+            ps.delete_device_state(&ep);
+        })
+        .await;
+    });
+
+    ctx.event_sender.send_device_deleted(&endpoint);
     Ok(())
 }
 

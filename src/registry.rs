@@ -303,6 +303,23 @@ impl DeviceRegistry {
         dev.state.clone()
     }
 
+    /// Remove a device by socket address. Returns the endpoint name if found.
+    /// In-flight and pending ops have their response channels fired with Timeout.
+    pub async fn remove_by_addr(&self, addr: SocketAddr) -> Option<String> {
+        let mut inner = self.inner.write().await;
+        let id = *inner.by_addr.get(&addr)?;
+        let dev = inner.by_id.remove(&id)?;
+        inner.by_endpoint.remove(&dev.endpoint);
+        inner.by_addr.remove(&addr);
+        for op in dev.pending_ops {
+            let _ = op.response_tx.send(Err(LwM2mError::Timeout));
+        }
+        for (_, op) in dev.in_flight {
+            let _ = op.response_tx.send(Err(LwM2mError::Timeout));
+        }
+        Some(dev.endpoint)
+    }
+
     /// Return the accumulated IPSO state for a device identified by endpoint name.
     pub async fn device_state_by_endpoint(&self, endpoint: &str) -> Option<serde_json::Value> {
         let inner = self.inner.read().await;

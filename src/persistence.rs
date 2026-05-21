@@ -200,6 +200,15 @@ impl PersistenceStore {
         }
     }
 
+    pub fn delete_device_state(&self, endpoint: &str) {
+        let path = self.dir.join("devices").join(format!("{endpoint}.json"));
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(endpoint, "persistence: delete device state failed: {e}");
+            }
+        }
+    }
+
     pub fn load_all_device_states(&self) -> HashMap<String, serde_json::Value> {
         let devices_dir = self.dir.join("devices");
         let mut states = HashMap::new();
