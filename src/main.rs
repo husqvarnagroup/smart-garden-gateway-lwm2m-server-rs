@@ -6,7 +6,7 @@ use tracing::info;
 
 use std::sync::Arc;
 
-use lwm2m_gateway::{
+use lwm2mserver_rs::{
     bootstrap::BootstrapRegistry,
     coap,
     coap::server::DispatchRequest,
@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lwm2m_gateway=info".into()),
+                .unwrap_or_else(|_| "lwm2mserver_rs=info".into()),
         )
         .init();
 
@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    info!("lwm2m-gateway starting");
+    info!("lwm2mserver-rs starting");
 
     tokio::select! {
         r = coap::server::run(
@@ -117,6 +117,6 @@ async fn main() -> anyhow::Result<()> {
         ) => { r.map_err(|e| anyhow::anyhow!("event: {e}"))? }
     }
 
-    info!("lwm2m-gateway stopped");
+    info!("lwm2mserver-rs stopped");
     Ok(())
 }

@@ -1,9 +1,9 @@
-# lwm2m-gateway
+# lwm2mserver-rs
 
 Rust service running on an embedded Linux gateway. It acts as an LWM2M server for IoT devices communicating over a proprietary radio (PPP/IPv6) and exposes Unix domain sockets for local command/event integration.
 
 ```
-local process  ──IPC (Unix socket)──►  lwm2m-gateway  ──CoAP/UDP/IPv6──►  IoT devices
+local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/IPv6──►  IoT devices
                ◄──event (Unix socket)─  (on gateway)         (ppp0)
 ```
 
@@ -54,14 +54,14 @@ cargo clippy
 cross build --release --target armv5te-unknown-linux-gnueabi
 ```
 
-Output: `target/armv5te-unknown-linux-gnueabi/release/lwm2m-gateway`
+Output: `target/armv5te-unknown-linux-gnueabi/release/lwm2mserver-rs`
 
 ---
 
 ## Deploy to gateway
 
 ```bash
-scp -O target/armv5te-unknown-linux-gnueabi/release/lwm2m-gateway \
+scp -O target/armv5te-unknown-linux-gnueabi/release/lwm2mserver-rs \
     root@192.168.1.61:/usr/local/bin/
 ```
 
@@ -72,14 +72,14 @@ The `-O` flag forces legacy SCP protocol — required because the gateway's Busy
 ## Usage
 
 ```bash
-lwm2m-gateway ppp0 --bind-to-device \
+lwm2mserver-rs ppp0 --bind-to-device \
     --server-uri "coap://[fc00::6:100:0:0]" \
     --port 20017 \
     --lb-key-file /var/lib/lemonbeatd/Network_management/Network_key.json \
     --ipso-directories /usr/share/lwm2m/objects /etc/lwm2m/objects
 ```
 
-Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2m_gateway=debug`.
+Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2mserver_rs=debug`.
 
 ### Arguments
 
@@ -91,7 +91,7 @@ Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2m_gateway=debug`.
 | `--port` | no | `20017` | UDP port to listen on |
 | `--lb-key-file` | no | `/var/lib/lemonbeatd/…/Network_key.json` | JSON file containing `"network_key"` as a hex string |
 | `--ipso-directories` | no | _(none)_ | One or more directories containing IPSO object definition XML files (space-separated). All `*.xml` files in each directory are loaded at startup and used to translate `/dp` payloads into named, typed events. |
-| `RUST_LOG` | no | `lwm2m_gateway=info` | Log filter (env var) |
+| `RUST_LOG` | no | `lwm2mserver_rs=info` | Log filter (env var) |
 
 ---
 

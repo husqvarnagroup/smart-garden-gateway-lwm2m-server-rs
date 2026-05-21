@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
-use lwm2m_gateway::{
+use lwm2mserver_rs::{
     bootstrap::BootstrapRegistry,
     coap,
     coap::server::DispatchRequest,
