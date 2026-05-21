@@ -7,4 +7,5 @@ pub mod housekeeping;
 pub mod ipc;
 pub mod ipso;
 pub mod model;
+pub mod persistence;
 pub mod registry;

@@ -12,6 +12,7 @@ use lwm2m_gateway::{
     housekeeping,
     ipc,
     ipso::IpsoModel,
+    persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
 
@@ -53,6 +54,10 @@ impl TestGateway {
         let dispatch_tx_ipc = dispatch_tx.clone();
         let cancel = CancellationToken::new();
 
+        let persistence = Arc::new(PersistenceStore::new(
+            tmp.path().join("persist"),
+            "coap://[::1]",
+        ));
         tokio::spawn(coap::server::run(
             socket.clone(),
             registry.clone(),
@@ -60,6 +65,7 @@ impl TestGateway {
             dispatch_tx,
             event_sender.clone(),
             Arc::new(IpsoModel::default()),
+            persistence,
             cancel.clone(),
         ));
         tokio::spawn(coap::client::run(

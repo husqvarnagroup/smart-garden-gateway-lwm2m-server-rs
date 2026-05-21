@@ -15,6 +15,7 @@ use lwm2m_gateway::{
     housekeeping,
     ipc,
     ipso::IpsoModel,
+    persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
 
@@ -35,6 +36,26 @@ async fn main() -> anyhow::Result<()> {
     let bootstrap_registry_ipc = bootstrap_registry.clone();
     let event_sender = EventSender::new();
     let cancel = CancellationToken::new();
+
+    let persistence = Arc::new(PersistenceStore::new(
+        PathBuf::from("/var/lib/lwm2mserver"),
+        &cfg.server_uri,
+    ));
+
+    // Restore persisted state before starting the server.
+    let snapshots = persistence.load_registry();
+    if !snapshots.is_empty() {
+        info!(count = snapshots.len(), "persistence: restoring devices");
+        registry.restore(snapshots).await;
+    }
+    let included = persistence.load_included();
+    if !included.is_empty() {
+        info!(count = included.len(), "persistence: restoring included devices");
+        bootstrap_registry.load_included(included).await;
+    }
+    for (ep, state) in persistence.load_all_device_states() {
+        registry.restore_device_state(&ep, state).await;
+    }
 
     let socket = coap::bind(cfg.coap_bind_addr, cfg.coap_interface.as_deref())
         .await
@@ -62,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
             coap_dispatch_tx,
             event_sender.clone(),
             ipso.clone(),
+            persistence,
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap server: {e}"))? }
 

@@ -2,12 +2,26 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::model::{Device, DeviceId, LwM2mError, PendingOperation};
+
+pub struct DeviceSnapshot {
+    pub id: DeviceId,
+    pub endpoint: String,
+    pub addr: SocketAddr,
+    pub lifetime: u32,
+    pub objects: Vec<String>,
+    pub object_versions: HashMap<u32, String>,
+    pub lwm2m_version: String,
+    pub binding_mode: String,
+    /// Unix timestamp when the registration expires.
+    pub end_of_life: u64,
+}
 
 struct RegistryInner {
     by_id: HashMap<DeviceId, Device>,
@@ -48,6 +62,8 @@ impl DeviceRegistry {
         lifetime: u32,
         objects: Vec<String>,
         object_versions: HashMap<u32, String>,
+        lwm2m_version: String,
+        binding_mode: String,
     ) -> DeviceId {
         let mut inner = self.inner.write().await;
 
@@ -63,6 +79,8 @@ impl DeviceRegistry {
             dev.lifetime = lifetime;
             dev.objects = objects;
             dev.object_versions = object_versions;
+            dev.lwm2m_version = lwm2m_version;
+            dev.binding_mode = binding_mode;
             let now = std::time::Instant::now();
             dev.registered_at = now;
             dev.last_contact = now;
@@ -73,7 +91,7 @@ impl DeviceRegistry {
         let id = inner.next_id;
         inner.next_id = inner.next_id.wrapping_add(1).max(1);
 
-        let dev = Device::new(id, endpoint.clone(), addr, lifetime, objects, object_versions);
+        let dev = Device::new(id, endpoint.clone(), addr, lifetime, objects, object_versions, lwm2m_version, binding_mode);
         inner.by_id.insert(id, dev);
         inner.by_endpoint.insert(endpoint.clone(), id);
         inner.by_addr.insert(addr, id);
@@ -211,5 +229,92 @@ impl DeviceRegistry {
         }
     }
 
+    /// Snapshot all registered devices for persistence.
+    pub async fn snapshot(&self) -> Vec<DeviceSnapshot> {
+        let inner = self.inner.read().await;
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        inner.by_id.values().map(|dev| {
+            let elapsed = dev.last_contact.elapsed().as_secs();
+            let remaining = dev.lifetime.saturating_sub(elapsed as u32);
+            DeviceSnapshot {
+                id: dev.id,
+                endpoint: dev.endpoint.clone(),
+                addr: dev.addr,
+                lifetime: remaining,
+                objects: dev.objects.clone(),
+                object_versions: dev.object_versions.clone(),
+                lwm2m_version: dev.lwm2m_version.clone(),
+                binding_mode: dev.binding_mode.clone(),
+                end_of_life: now_unix + remaining as u64,
+            }
+        }).collect()
+    }
 
+    /// Restore devices from persisted snapshots.
+    /// Restored devices start as offline; the first contact triggers an online event.
+    pub async fn restore(&self, snapshots: Vec<DeviceSnapshot>) {
+        let mut inner = self.inner.write().await;
+        for s in snapshots {
+            if s.id >= inner.next_id {
+                inner.next_id = s.id + 1;
+            }
+            let dev = crate::model::Device {
+                id: s.id,
+                endpoint: s.endpoint.clone(),
+                addr: s.addr,
+                lifetime: s.lifetime,
+                registered_at: std::time::Instant::now(),
+                last_contact: std::time::Instant::now(),
+                objects: s.objects,
+                object_versions: s.object_versions,
+                lwm2m_version: s.lwm2m_version,
+                binding_mode: s.binding_mode,
+                state: serde_json::Value::Object(serde_json::Map::new()),
+                online: Some(false),
+                pending_ops: std::collections::VecDeque::new(),
+                in_flight: std::collections::HashMap::new(),
+            };
+            inner.by_endpoint.insert(s.endpoint, s.id);
+            inner.by_addr.insert(s.addr, s.id);
+            inner.by_id.insert(s.id, dev);
+        }
+    }
+
+    /// Deep-merge IPSO state into the device at `addr`. Returns the full merged state.
+    pub async fn merge_device_state_by_addr(
+        &self,
+        addr: SocketAddr,
+        new_state: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut inner = self.inner.write().await;
+        let Some(&id) = inner.by_addr.get(&addr) else { return new_state; };
+        let dev = inner.by_id.get_mut(&id).unwrap();
+        json_merge(&mut dev.state, new_state);
+        dev.state.clone()
+    }
+
+    /// Restore persisted IPSO state for a device identified by endpoint name.
+    pub async fn restore_device_state(&self, endpoint: &str, state: serde_json::Value) {
+        let mut inner = self.inner.write().await;
+        let Some(&id) = inner.by_endpoint.get(endpoint) else { return; };
+        if let Some(dev) = inner.by_id.get_mut(&id) {
+            dev.state = state;
+        }
+    }
+}
+
+fn json_merge(target: &mut serde_json::Value, source: serde_json::Value) {
+    if let (Some(t), serde_json::Value::Object(s)) = (target.as_object_mut(), source) {
+        for (k, v) in s {
+            let entry = t.entry(k).or_insert(serde_json::Value::Null);
+            if entry.is_object() && v.is_object() {
+                json_merge(entry, v);
+            } else {
+                *entry = v;
+            }
+        }
+    }
 }

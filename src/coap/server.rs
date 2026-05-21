@@ -13,6 +13,7 @@ use crate::{
     event::EventSender,
     ipso::IpsoModel,
     model::{LwM2mError, PendingOperation, ResourceValue},
+    persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
 
@@ -33,6 +34,7 @@ pub async fn run(
     coap_dispatch_tx: mpsc::Sender<DispatchRequest>,
     event_sender: EventSender,
     ipso: Arc<IpsoModel>,
+    persistence: Arc<PersistenceStore>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_PACKET];
@@ -53,6 +55,7 @@ pub async fn run(
                             coap_dispatch_tx: &coap_dispatch_tx,
                             event_sender: &event_sender,
                             ipso: &ipso,
+                            persistence: &persistence,
                         };
                         if let Err(e) = handle_packet(&buf[..len], addr, &ctx).await {
                             warn!(%addr, "error handling CoAP packet: {e}");
@@ -79,6 +82,7 @@ struct ServerCtx<'a> {
     coap_dispatch_tx: &'a mpsc::Sender<DispatchRequest>,
     event_sender: &'a EventSender,
     ipso: &'a Arc<IpsoModel>,
+    persistence: &'a Arc<PersistenceStore>,
 }
 
 async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
@@ -127,11 +131,11 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
     match path_parts.as_slice() {
         // POST /bs?ep=<name>&pct=<fmt>  — bootstrap request
         [p] if *p == BS_PATH => {
-            handle_bootstrap(packet, addr, ctx.socket, ctx.bootstrap_registry, ctx.event_sender).await?;
+            handle_bootstrap(packet, addr, ctx.socket, ctx.bootstrap_registry, ctx.event_sender, ctx.persistence).await?;
         }
         // POST /rd?ep=<name>&lt=<lifetime>&b=U  — new registration
         [p] if *p == RD_PATH => {
-            handle_registration(packet, addr, ctx.socket, ctx.registry).await?;
+            handle_registration(packet, addr, ctx.socket, ctx.registry, ctx.persistence).await?;
         }
         // POST /rd/<id>  — registration update (heartbeat)
         [p, _id] if *p == RD_PATH => {
@@ -139,7 +143,7 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
         }
         // POST /dp  — device data push (SenML+CBOR state report after registration)
         [p] if *p == DP_PATH => {
-            handle_dp(packet, addr, ctx.socket, ctx.registry, ctx.event_sender, ctx.ipso).await?;
+            handle_dp(packet, addr, ctx.socket, ctx.registry, ctx.event_sender, ctx.ipso, ctx.persistence).await?;
         }
         _ => {
             warn!(%addr, path, "POST to unknown path");
@@ -155,6 +159,7 @@ async fn handle_bootstrap(
     socket: &Arc<UdpSocket>,
     bootstrap_registry: &BootstrapRegistry,
     event_sender: &EventSender,
+    persistence: &Arc<PersistenceStore>,
 ) -> Result<()> {
     let query = uri_query(&packet);
     let params = parse_query(&query);
@@ -188,6 +193,7 @@ async fn handle_bootstrap(
         let br = bootstrap_registry.clone();
         let es = event_sender.clone();
         let ep = endpoint.clone();
+        let ps = Arc::clone(persistence);
         tokio::spawn(async move {
             es.send_includable(id, &ep, true, false);
             match bootstrap_write_phase(ep.clone(), addr, socket_c, br.clone(), server_uri).await {
@@ -195,6 +201,12 @@ async fn handle_bootstrap(
                     es.send_connection_status(&ep, true);
                     es.send_includable(id, &ep, true, true);
                     br.remove_includable_id(&ep).await;
+                    br.mark_included(&ep).await;
+                    let included = br.included_list().await;
+                    let ps2 = Arc::clone(&ps);
+                    tokio::spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || ps2.save_included(&included)).await;
+                    });
                     info!(endpoint = %ep, "inclusion completed");
                 }
                 Err(e) => {
@@ -273,6 +285,7 @@ async fn handle_registration(
     addr: SocketAddr,
     socket: &Arc<UdpSocket>,
     registry: &DeviceRegistry,
+    persistence: &Arc<PersistenceStore>,
 ) -> Result<()> {
     let query = uri_query(&packet);
     let params = parse_query(&query);
@@ -283,6 +296,8 @@ async fn handle_registration(
         .get("lt")
         .and_then(|v| v.parse().ok())
         .unwrap_or(86400);
+    let lwm2m_version = params.get("lwm2m").cloned().unwrap_or_else(|| "1.0".to_owned());
+    let binding_mode = params.get("b").cloned().unwrap_or_default();
 
     if endpoint.is_empty() {
         warn!(%addr, "registration missing ep parameter");
@@ -294,7 +309,7 @@ async fn handle_registration(
     let body = std::str::from_utf8(packet.payload.as_slice()).unwrap_or("");
     let (objects, object_versions) = parse_link_format(body);
 
-    let id = registry.register(endpoint.clone(), addr, lifetime, objects, object_versions).await;
+    let id = registry.register(endpoint.clone(), addr, lifetime, objects, object_versions, lwm2m_version, binding_mode).await;
 
     // 2.01 Created with Location-Path: rd / <id>
     let mut response = make_response(&packet, Status::Created);
@@ -307,6 +322,13 @@ async fn handle_registration(
     send_encrypted_packet(socket, &bytes, addr).await?;
 
     info!(%endpoint, id, %addr, "device registered");
+
+    let snapshots = registry.snapshot().await;
+    let ps = Arc::clone(persistence);
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || ps.save_registry(&snapshots)).await;
+    });
+
     Ok(())
 }
 
@@ -371,6 +393,7 @@ async fn handle_dp(
     registry: &DeviceRegistry,
     event_sender: &EventSender,
     ipso: &IpsoModel,
+    persistence: &Arc<PersistenceStore>,
 ) -> Result<()> {
     send_encrypted_response(socket, addr, &packet, Status::Changed, None).await?;
 
@@ -388,7 +411,13 @@ async fn handle_dp(
     match build_device_payload(&packet.payload, ipso, &obj_versions) {
         Some(payload) => {
             info!(%addr, endpoint = %endpoint, "dp: emitting device data event");
+            let state = registry.merge_device_state_by_addr(addr, payload.clone()).await;
             event_sender.send_device_data(&endpoint, payload);
+            let ps = Arc::clone(persistence);
+            let ep = endpoint.clone();
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || ps.save_device_state(&ep, &state)).await;
+            });
         }
         None => warn!(%addr, endpoint = %endpoint, "dp: no known objects in payload"),
     }

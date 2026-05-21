@@ -80,6 +80,12 @@ pub struct Device {
     pub objects: Vec<String>,
     /// Object versions from the link-format `ver` attribute, keyed by object id.
     pub object_versions: HashMap<u32, String>,
+    /// LWM2M version from /rd `lwm2m=` query param (e.g. "1.1").
+    pub lwm2m_version: String,
+    /// Binding mode from /rd `b=` query param (e.g. "U").
+    pub binding_mode: String,
+    /// Accumulated merged IPSO state from all /dp payloads + connection_status.
+    pub state: serde_json::Value,
     /// None = unknown, Some(true) = online, Some(false) = offline.
     pub online: Option<bool>,
     /// Operations waiting to be sent on next device contact.
@@ -96,6 +102,8 @@ impl Device {
         lifetime: u32,
         objects: Vec<String>,
         object_versions: HashMap<u32, String>,
+        lwm2m_version: String,
+        binding_mode: String,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -107,6 +115,9 @@ impl Device {
             last_contact: now,
             objects,
             object_versions,
+            lwm2m_version,
+            binding_mode,
+            state: serde_json::Value::Object(serde_json::Map::new()),
             online: Some(true),
             pending_ops: VecDeque::new(),
             in_flight: HashMap::new(),

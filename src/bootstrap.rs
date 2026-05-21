@@ -46,6 +46,8 @@ struct RegistryInner {
     /// Reverse index: id → endpoint.
     includable_by_id: HashMap<u32, String>,
     next_includable_id: u32,
+    /// Endpoints that have successfully completed inclusion (persisted across restarts).
+    included: HashSet<String>,
     mid_counter: u16,
     /// Oneshot senders for pending write-phase CON requests, keyed by token.
     write_acks: HashMap<[u8; 8], oneshot::Sender<bool>>,
@@ -94,6 +96,7 @@ impl BootstrapRegistry {
                 includable_ids: HashMap::new(),
                 includable_by_id: HashMap::new(),
                 next_includable_id: 1,
+                included: HashSet::new(),
                 mid_counter: mid_start,
                 write_acks: HashMap::new(),
             })),
@@ -273,6 +276,29 @@ impl BootstrapRegistry {
         let mut inner = self.inner.lock().await;
         if let Some(id) = inner.includable_ids.remove(endpoint) {
             inner.includable_by_id.remove(&id);
+        }
+    }
+
+    /// Record that this endpoint has completed inclusion. Persisted via included_devices.json.
+    pub async fn mark_included(&self, endpoint: &str) {
+        self.inner.lock().await.included.insert(endpoint.to_owned());
+    }
+
+    /// True if this endpoint has previously completed inclusion.
+    pub async fn is_included(&self, endpoint: &str) -> bool {
+        self.inner.lock().await.included.contains(endpoint)
+    }
+
+    /// Snapshot the included set for persistence.
+    pub async fn included_list(&self) -> Vec<String> {
+        self.inner.lock().await.included.iter().cloned().collect()
+    }
+
+    /// Restore the included set from a persisted list.
+    pub async fn load_included(&self, endpoints: Vec<String>) {
+        let mut inner = self.inner.lock().await;
+        for ep in endpoints {
+            inner.included.insert(ep);
         }
     }
 
