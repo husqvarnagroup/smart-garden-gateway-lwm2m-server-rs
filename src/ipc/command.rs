@@ -108,8 +108,15 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
                 let included = ctx.bootstrap_registry.included_list().await;
                 let mut payload = serde_json::Map::new();
                 for ep in &included {
-                    let state = ctx.registry.device_state_by_endpoint(ep).await
-                        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                    let (mut state, online) = ctx.registry.device_state_by_endpoint(ep).await
+                        .unwrap_or_else(|| (serde_json::Value::Object(serde_json::Map::new()), None));
+                    if let (Some(obj), Some(online)) = (state.as_object_mut(), online) {
+                        let ts = crate::ipc::event::unix_ts();
+                        obj.insert("connection_status".into(), serde_json::json!({
+                            "_urn": "urn:oma:lwm2m:x:28171",
+                            "0": {"online": {"vb": online, "ts": ts}}
+                        }));
+                    }
                     payload.insert(ep.clone(), state);
                 }
                 info!(count = included.len(), "IPC: read devices");

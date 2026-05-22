@@ -366,11 +366,12 @@ impl DeviceRegistry {
         Some(dev.endpoint)
     }
 
-    /// Return the accumulated IPSO state for a device identified by endpoint name.
-    pub async fn device_state_by_endpoint(&self, endpoint: &str) -> Option<serde_json::Value> {
+    /// Return the accumulated IPSO state and online status for a device identified by endpoint name.
+    pub async fn device_state_by_endpoint(&self, endpoint: &str) -> Option<(serde_json::Value, Option<bool>)> {
         let inner = self.inner.read().await;
         let &id = inner.by_endpoint.get(endpoint)?;
-        Some(inner.by_id[&id].state.clone())
+        let dev = &inner.by_id[&id];
+        Some((dev.state.clone(), dev.online))
     }
 
     /// Restore persisted IPSO state for a device identified by endpoint name.
