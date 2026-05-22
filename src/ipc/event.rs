@@ -149,7 +149,9 @@ async fn relay_to_client(
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Event socket subscriber lagged, dropped {n} messages");
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
