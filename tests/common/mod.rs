@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::{Arc, RwLock}, time::Duration};
 
 use tempfile::TempDir;
 use tokio::{net::UdpSocket, sync::mpsc};
@@ -51,7 +51,7 @@ impl TestGateway {
         let dispatch_tx_hk = dispatch_tx.clone();
         let cancel = CancellationToken::new();
         let block_acks = lwm2m::new_block_ack_map();
-        let ipso = Arc::new(IpsoModel::default());
+        let ipso = Arc::new(RwLock::new(Arc::new(IpsoModel::default())));
 
         let persistence = Arc::new(PersistenceStore::new(
             tmp.path().join("persist"),

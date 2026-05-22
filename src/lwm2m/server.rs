@@ -1,9 +1,16 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use coap_lite::{
     CoapOption, MessageClass, MessageType, Packet, RequestType as Method, ResponseType as Status,
 };
-use tokio::{net::UdpSocket, sync::mpsc};
+use tokio::{net::UdpSocket, sync::{mpsc, oneshot}};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -14,12 +21,16 @@ use crate::{
     },
     error::Result,
     ipc::event::EventSender,
-    model::{LwM2mError, PendingOperation},
+    model::{LwM2mCommand, LwM2mError, PendingOperation, ResourcePath},
     persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
 
 use super::{content_format::SENML_CBOR, set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN};
+
+/// Op-ID counter for server-internal operations (factory reset etc.).
+/// Starts at 0x8000_0000 to stay well clear of IPC op IDs (which begin at 1).
+static INTERNAL_OP_ID: AtomicU32 = AtomicU32::new(0x8000_0000);
 
 const BS_PATH: &str = "bs";
 const DP_PATH: &str = "dp";
@@ -149,7 +160,7 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
         }
         // POST /rd?ep=<name>&lt=<lifetime>&b=U  — new registration
         [p] if *p == RD_PATH => {
-            handle_registration(packet, addr, ctx.socket, ctx.registry, ctx.persistence).await?;
+            handle_registration(packet, addr, ctx.socket, ctx.registry, ctx.bootstrap_registry, ctx.coap_dispatch_tx, ctx.persistence).await?;
         }
         // POST /rd/<id>  — registration update (heartbeat)
         [p, _id] if *p == RD_PATH => {
@@ -325,6 +336,8 @@ async fn handle_registration(
     addr: SocketAddr,
     socket: &Arc<UdpSocket>,
     registry: &DeviceRegistry,
+    bootstrap_registry: &BootstrapRegistry,
+    coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
     persistence: &Arc<PersistenceStore>,
 ) -> Result<()> {
     let query = uri_query(&packet);
@@ -362,6 +375,36 @@ async fn handle_registration(
     send_encrypted_packet(socket, &bytes, addr).await?;
 
     info!(device = %endpoint, id, %addr, activity = "registration", "Device registered");
+
+    if !bootstrap_registry.is_included(&endpoint).await {
+        warn!(device = %endpoint, activity = "registration", "Device not included — triggering factory reset");
+
+        let (response_tx, _) = oneshot::channel();
+        let op = PendingOperation {
+            id: INTERNAL_OP_ID.fetch_add(1, Ordering::Relaxed),
+            command: LwM2mCommand::Execute {
+                path: ResourcePath { object_id: 3, instance_id: 0, resource_id: 5 },
+                args: None,
+            },
+            response_tx,
+            created_at: std::time::Instant::now(),
+            attempts: 0,
+        };
+        let _ = coap_dispatch_tx.send(DispatchRequest { addr, ops: vec![op] }).await;
+
+        let registry = registry.clone();
+        let ps = Arc::clone(persistence);
+        let ep = endpoint.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            registry.remove_by_addr(addr).await;
+            info!(device = %ep, activity = "registration", "Device disconnected after factory reset");
+            let snapshots = registry.snapshot().await;
+            let _ = tokio::task::spawn_blocking(move || ps.save_registry(&snapshots)).await;
+        });
+
+        return Ok(());
+    }
 
     let snapshots = registry.snapshot().await;
     let ps = Arc::clone(persistence);

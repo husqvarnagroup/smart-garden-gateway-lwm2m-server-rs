@@ -95,6 +95,10 @@ async fn coap_deregister_included_device_preserves_inclusion() {
     let gw = common::TestGateway::start().await;
     let mut events = gw.event_sender.subscribe();
 
+    // Device is already included before it registers (the normal post-bootstrap state).
+    gw.bootstrap_registry.mark_included("test-device").await;
+    assert!(gw.bootstrap_registry.is_included("test-device").await);
+
     // Register the device.
     let sock = UdpSocket::bind("[::1]:0").await.unwrap();
     sock.send_to(&registration_packet(), gw.coap_addr).await.unwrap();
@@ -114,10 +118,6 @@ async fn coap_deregister_included_device_preserves_inclusion() {
         .and_then(|list| list.iter().nth(1))
         .map(|v| String::from_utf8_lossy(v).into_owned())
         .expect("missing registration id in Location-Path");
-
-    // Simulate the device having been included.
-    gw.bootstrap_registry.mark_included("test-device").await;
-    assert!(gw.bootstrap_registry.is_included("test-device").await);
 
     // Device sends DELETE /rd/<id> — as it would before a firmware-update reboot.
     let mut del = Packet::new();
