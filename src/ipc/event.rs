@@ -101,7 +101,7 @@ impl EventSender {
         let _ = self.tx.send(format!("{msg}\n"));
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<String> {
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.tx.subscribe()
     }
 }

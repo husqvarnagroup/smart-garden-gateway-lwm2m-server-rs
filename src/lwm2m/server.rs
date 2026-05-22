@@ -175,29 +175,18 @@ async fn handle_delete(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) ->
         return Ok(());
     };
 
-    let was_included = ctx.bootstrap_registry.is_included(&endpoint).await;
+    // A device-initiated DELETE means the device is going offline temporarily (e.g. firmware
+    // update reboot). It does NOT mean exclusion: the device stays included and its persisted
+    // state is preserved so it can resume normally after reconnecting.
     info!(device = %endpoint, activity = "connection-status", "Device is offline");
-    ctx.bootstrap_registry.unmark_included(&endpoint).await;
-    if was_included {
-        info!(device = %endpoint, activity = "exclusion", "Device excluded");
-        info!(device = %endpoint, activity = "registration", "Device deregistered");
-    } else {
-        info!(device = %endpoint, activity = "exclusion", "Device which was not included is now disconnected");
-    }
-    let included = ctx.bootstrap_registry.included_list().await;
+    info!(device = %endpoint, activity = "registration", "Device deregistered");
+
     let snapshots = ctx.registry.snapshot().await;
     let ps = Arc::clone(ctx.persistence);
-    let ep = endpoint.clone();
     tokio::spawn(async move {
-        let _ = tokio::task::spawn_blocking(move || {
-            ps.save_registry(&snapshots);
-            ps.save_included(&included);
-            ps.delete_device_state(&ep);
-        })
-        .await;
+        let _ = tokio::task::spawn_blocking(move || ps.save_registry(&snapshots)).await;
     });
 
-    ctx.event_sender.send_device_deleted(&endpoint);
     Ok(())
 }
 

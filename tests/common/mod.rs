@@ -5,13 +5,9 @@ use tokio::{net::UdpSocket, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
 use lwm2mserver_rs::{
-    bootstrap::BootstrapRegistry,
-    coap,
-    coap::server::DispatchRequest,
-    event::{self, EventSender},
+    lwm2m::{self, bootstrap::BootstrapRegistry, ipso::IpsoModel, server::DispatchRequest},
+    ipc::{command, event::{self, EventSender}},
     housekeeping,
-    ipc,
-    ipso::IpsoModel,
     persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
@@ -41,7 +37,7 @@ impl TestGateway {
 
         // Bind CoAP UDP to loopback:0 — OS picks a free port.
         let bind_addr: SocketAddr = "[::1]:0".parse().unwrap();
-        let socket: Arc<UdpSocket> = coap::bind(bind_addr, None).await.expect("coap bind");
+        let socket: Arc<UdpSocket> = lwm2m::bind(bind_addr, None).await.expect("coap bind");
         let coap_addr = socket.local_addr().expect("local addr");
 
         let registry = DeviceRegistry::new();
@@ -52,39 +48,46 @@ impl TestGateway {
         let event_sender = EventSender::new();
         let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
         let dispatch_tx_ipc = dispatch_tx.clone();
+        let dispatch_tx_hk = dispatch_tx.clone();
         let cancel = CancellationToken::new();
+        let block_acks = lwm2m::new_block_ack_map();
+        let ipso = Arc::new(IpsoModel::default());
 
         let persistence = Arc::new(PersistenceStore::new(
             tmp.path().join("persist"),
             "coap://[::1]",
         ));
-        tokio::spawn(coap::server::run(
+        tokio::spawn(lwm2m::server::run(
             socket.clone(),
             registry.clone(),
             bootstrap_registry.clone(),
             dispatch_tx,
             event_sender.clone(),
-            Arc::new(IpsoModel::default()),
+            ipso.clone(),
             persistence,
+            block_acks.clone(),
             cancel.clone(),
         ));
-        tokio::spawn(coap::client::run(
+        tokio::spawn(lwm2m::client::run(
             socket,
             registry.clone(),
             dispatch_rx,
             event_sender.clone(),
+            block_acks,
             cancel.clone(),
         ));
         tokio::spawn(housekeeping::run(
             registry.clone(),
             bootstrap_registry.clone(),
+            dispatch_tx_hk,
+            ipso.clone(),
             cancel.clone(),
         ));
-        tokio::spawn(ipc::run(
+        tokio::spawn(command::run(
             ipc_path.clone(),
             bootstrap_registry.clone(),
             registry.clone(),
-            Arc::new(IpsoModel::default()),
+            ipso,
             dispatch_tx_ipc,
             cancel.clone(),
         ));
