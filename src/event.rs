@@ -109,13 +109,13 @@ impl EventSender {
 pub async fn run(path: PathBuf, events: EventSender, cancel: CancellationToken) -> Result<()> {
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
-    info!(path = %path.display(), "event socket listening");
+    info!(path = %path.display(), "Event socket listening");
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
                 let _ = std::fs::remove_file(&path);
-                info!("event socket shutting down");
+                info!("Event socket shutting down");
                 return Ok(());
             }
             result = listener.accept() => {
@@ -123,7 +123,7 @@ pub async fn run(path: PathBuf, events: EventSender, cancel: CancellationToken) 
                     Ok((stream, _)) => {
                         tokio::spawn(relay_to_client(stream, events.subscribe()));
                     }
-                    Err(e) => warn!("event socket accept: {e}"),
+                    Err(e) => warn!("Event socket accept: {e}"),
                 }
             }
         }

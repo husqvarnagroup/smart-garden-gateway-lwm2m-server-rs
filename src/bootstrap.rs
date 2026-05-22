@@ -85,7 +85,7 @@ impl BootstrapRegistry {
         // to /0/1/4 (Server Public Key) during bootstrap write phase.
         let secret = SecretKey::random(&mut OsRng);
         let pubkey_bytes = secret.public_key().to_encoded_point(true).as_bytes().to_vec();
-        info!(pubkey = %hex(&pubkey_bytes), "bootstrap: generated ephemeral server P-256 keypair");
+        info!(pubkey = %hex(&pubkey_bytes), "Bootstrap: generated ephemeral server P-256 keypair");
 
         Self {
             inner: Arc::new(Mutex::new(RegistryInner {
@@ -131,7 +131,7 @@ impl BootstrapRegistry {
             },
         );
 
-        info!(%endpoint, %device_addr, token = hex(&token[..4]), "bootstrap session started");
+        tracing::debug!(%endpoint, %device_addr, token = hex(&token[..4]), "Bootstrap session started");
         Some((token, mid))
     }
 
@@ -144,7 +144,7 @@ impl BootstrapRegistry {
             info!(
                 endpoint = %session.endpoint,
                 bytes = payload.len(),
-                "bootstrap: received public key payload"
+                "Bootstrap read security object done"
             );
             inner.cert_cache.insert(session.endpoint.clone(), payload.clone());
             session.pubkey_payload = Some(payload);
@@ -231,7 +231,7 @@ impl BootstrapRegistry {
         for token in stale {
             if let Some(s) = inner.by_token.remove(&token) {
                 inner.by_endpoint.remove(&s.endpoint);
-                warn!(endpoint = %s.endpoint, "bootstrap session timed out");
+                warn!(endpoint = %s.endpoint, "Bootstrap session timed out");
             }
         }
     }
@@ -262,7 +262,7 @@ impl BootstrapRegistry {
         let mut inner = self.inner.lock().await;
         let endpoint = inner.includable_by_id.get(&id)?.clone();
         inner.approved.insert(endpoint.clone());
-        info!(endpoint = %endpoint, id, "bootstrap: inclusion approved, awaiting next /bs");
+        info!(endpoint = %endpoint, id, "Bootstrap: inclusion approved, awaiting next /bs");
         Some(endpoint)
     }
 

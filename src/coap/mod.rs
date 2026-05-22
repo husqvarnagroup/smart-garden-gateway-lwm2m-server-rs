@@ -22,7 +22,7 @@ pub fn set_tclass(socket: &UdpSocket, tc: u32) {
     {
         use socket2::SockRef;
         if let Err(e) = SockRef::from(socket).set_tclass_v6(tc) {
-            tracing::warn!(tc, "set_tclass_v6 failed: {e}");
+            tracing::warn!(tc, "Failed to set traffic class: {e}");
         }
     }
     #[cfg(not(target_os = "linux"))]

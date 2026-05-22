@@ -21,7 +21,7 @@ impl PersistenceStore {
 
     pub fn save_registry(&self, snapshots: &[DeviceSnapshot]) {
         if let Err(e) = std::fs::create_dir_all(&self.dir) {
-            warn!(dir = %self.dir.display(), "persistence: create dir failed: {e}");
+            warn!(dir = %self.dir.display(), "Persistence: create dir failed: {e}");
             return;
         }
         let clients: Vec<serde_json::Value> = snapshots
@@ -76,10 +76,10 @@ impl PersistenceStore {
             Ok(json) => {
                 let path = self.dir.join("wakaama.json");
                 if let Err(e) = write_atomic(&path, &json) {
-                    warn!(path = %path.display(), "persistence: save wakaama.json failed: {e}");
+                    warn!(path = %path.display(), "Persistence: save wakaama.json failed: {e}");
                 }
             }
-            Err(e) => warn!("persistence: serialize wakaama.json failed: {e}"),
+            Err(e) => warn!("Persistence: serialize wakaama.json failed: {e}"),
         }
     }
 
@@ -92,7 +92,7 @@ impl PersistenceStore {
         let doc: serde_json::Value = match serde_json::from_str(&content) {
             Ok(v) => v,
             Err(e) => {
-                warn!("persistence: load wakaama.json failed: {e}");
+                warn!("Persistence: load wakaama.json failed: {e}");
                 return Vec::new();
             }
         };
@@ -160,17 +160,17 @@ impl PersistenceStore {
 
     pub fn save_included(&self, endpoints: &[String]) {
         if let Err(e) = std::fs::create_dir_all(&self.dir) {
-            warn!(dir = %self.dir.display(), "persistence: create dir failed: {e}");
+            warn!(dir = %self.dir.display(), "Persistence: create dir failed: {e}");
             return;
         }
         let path = self.dir.join("included_devices.json");
         match serde_json::to_vec_pretty(endpoints) {
             Ok(json) => {
                 if let Err(e) = write_atomic(&path, &json) {
-                    warn!(path = %path.display(), "persistence: save included_devices.json failed: {e}");
+                    warn!(path = %path.display(), "Persistence: save included_devices.json failed: {e}");
                 }
             }
-            Err(e) => warn!("persistence: serialize included_devices.json failed: {e}"),
+            Err(e) => warn!("Persistence: serialize included_devices.json failed: {e}"),
         }
     }
 
@@ -186,17 +186,17 @@ impl PersistenceStore {
     pub fn save_device_state(&self, endpoint: &str, state: &serde_json::Value) {
         let devices_dir = self.dir.join("devices");
         if let Err(e) = std::fs::create_dir_all(&devices_dir) {
-            warn!("persistence: create devices dir failed: {e}");
+            warn!("Persistence: create devices dir failed: {e}");
             return;
         }
         let path = devices_dir.join(format!("{endpoint}.json"));
         match serde_json::to_vec_pretty(state) {
             Ok(json) => {
                 if let Err(e) = write_atomic(&path, &json) {
-                    warn!(endpoint, "persistence: save device state failed: {e}");
+                    warn!(endpoint, "Persistence: save device state failed: {e}");
                 }
             }
-            Err(e) => warn!(endpoint, "persistence: serialize device state failed: {e}"),
+            Err(e) => warn!(endpoint, "Persistence: serialize device state failed: {e}"),
         }
     }
 
@@ -204,7 +204,7 @@ impl PersistenceStore {
         let path = self.dir.join("devices").join(format!("{endpoint}.json"));
         if let Err(e) = std::fs::remove_file(&path) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                warn!(endpoint, "persistence: delete device state failed: {e}");
+                warn!(endpoint, "Persistence: delete device state failed: {e}");
             }
         }
     }
@@ -231,7 +231,7 @@ impl PersistenceStore {
             };
             match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(v) => { states.insert(stem, v); }
-                Err(e) => warn!(path = %path.display(), "persistence: load device state failed: {e}"),
+                Err(e) => warn!(path = %path.display(), "Persistence: load device state failed: {e}"),
             }
         }
         states

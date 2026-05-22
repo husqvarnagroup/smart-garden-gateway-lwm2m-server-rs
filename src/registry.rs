@@ -85,7 +85,7 @@ impl DeviceRegistry {
             let now = std::time::Instant::now();
             dev.registered_at = now;
             dev.last_contact = now;
-            info!(endpoint, id, "device re-registered");
+            info!(endpoint, id, "Device registered");
             return id;
         }
 
@@ -97,7 +97,7 @@ impl DeviceRegistry {
         inner.by_endpoint.insert(endpoint.clone(), id);
         inner.by_addr.insert(addr, id);
 
-        info!(endpoint, id, "device registered");
+        info!(endpoint, id, "New device registered");
         id
     }
 
@@ -179,7 +179,7 @@ impl DeviceRegistry {
         let mut removed = Vec::new();
         for id in expired {
             if let Some(dev) = inner.by_id.remove(&id) {
-                warn!(endpoint = %dev.endpoint, "registration expired, removing device");
+                warn!(endpoint = %dev.endpoint, "Registration expired, removing device");
                 inner.by_endpoint.remove(&dev.endpoint);
                 inner.by_addr.remove(&dev.addr);
 
@@ -230,7 +230,7 @@ impl DeviceRegistry {
 
             for token in timed_out {
                 if let Some(op) = dev.in_flight.remove(&token) {
-                    warn!(endpoint = %dev.endpoint, op_id = op.id, "in-flight op timed out");
+                    warn!(endpoint = %dev.endpoint, op_id = op.id, "In-flight op timed out");
                     let _ = op.response_tx.send(Err(LwM2mError::Timeout));
                 }
             }

@@ -236,7 +236,8 @@ async fn dispatch_and_await(
         Ok(Ok(Ok(ResourceValue::CoapResponse { class, detail }))) => {
             let code = (class as u16) * 32 + detail as u16;
             let name = coap_status_name(class, detail);
-            info!(device, path, "IPC {op_name}: {name}");
+            let verb = if op_name == "execute" { "Executed" } else { "Written" };
+            info!(device, "{verb} resource {path}, success: true");
             serde_json::json!({
                 "metadata": {
                     "lwm2m_client_id": dev_id,

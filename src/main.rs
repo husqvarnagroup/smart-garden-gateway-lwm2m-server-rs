@@ -45,12 +45,12 @@ async fn main() -> anyhow::Result<()> {
     // Restore persisted state before starting the server.
     let snapshots = persistence.load_registry();
     if !snapshots.is_empty() {
-        info!(count = snapshots.len(), "persistence: restoring devices");
+        info!(count = snapshots.len(), "Restoring devices");
         registry.restore(snapshots).await;
     }
     let included = persistence.load_included();
     if !included.is_empty() {
-        info!(count = included.len(), "persistence: restoring included devices");
+        info!(count = included.len(), "Restoring included devices");
         bootstrap_registry.load_included(included).await;
     }
     for (ep, state) in persistence.load_all_device_states() {
@@ -68,12 +68,12 @@ async fn main() -> anyhow::Result<()> {
         let cancel = cancel.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
-            info!("shutdown signal received");
+            info!("Shutdown signal received");
             cancel.cancel();
         });
     }
 
-    info!("lwm2mserver-rs starting");
+    info!("Server starting");
 
     tokio::select! {
         r = coap::server::run(
@@ -117,6 +117,6 @@ async fn main() -> anyhow::Result<()> {
         ) => { r.map_err(|e| anyhow::anyhow!("event: {e}"))? }
     }
 
-    info!("lwm2mserver-rs stopped");
+    info!("Server stopped");
     Ok(())
 }

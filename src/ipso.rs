@@ -49,7 +49,7 @@ impl IpsoModel {
             let entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!(dir = %dir.display(), "ipso: cannot read directory: {e}");
+                    warn!(dir = %dir.display(), "Cannot read IPSO directory: {e}");
                     continue;
                 }
             };
@@ -62,7 +62,7 @@ impl IpsoModel {
                     Some((id, version, def)) => {
                         model.objects.entry(id).or_default().insert(version, def);
                     }
-                    None => warn!(path = %path.display(), "ipso: failed to parse XML"),
+                    None => warn!(path = %path.display(), "Failed to parse IPSO XML"),
                 }
             }
         }

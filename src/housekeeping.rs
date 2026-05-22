@@ -22,13 +22,13 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                info!("housekeeping task shutting down");
+                info!("Housekeeping task shutting down");
                 return Ok(());
             }
             _ = interval.tick() => {
                 let expired = registry.expire_stale(GRACE_SECS).await;
                 if !expired.is_empty() {
-                    warn!(count = expired.len(), endpoints = ?expired, "expired device registrations purged");
+                    warn!(count = expired.len(), endpoints = ?expired, "Expired device registrations purged");
                 }
                 registry.timeout_in_flight(IN_FLIGHT_TIMEOUT_SECS).await;
                 bootstrap_registry.expire_stale(BOOTSTRAP_TIMEOUT_SECS).await;

@@ -5,7 +5,7 @@ use coap_lite::{
 };
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     error::Result,
@@ -64,7 +64,7 @@ async fn dispatch_op(
     let packet = match build_request(&op.command, token, mid) {
         Ok(p) => p,
         Err(e) => {
-            warn!(op_id = op.id, "failed to build CoAP request: {e}");
+            warn!(op_id = op.id, "Failed to build CoAP request: {e}");
             let _ = op.response_tx.send(Err(LwM2mError::BadRequest));
             return;
         }
@@ -73,7 +73,7 @@ async fn dispatch_op(
     let bytes = match packet.to_bytes() {
         Ok(b) => b,
         Err(e) => {
-            warn!(op_id = op.id, "failed to encode CoAP packet: {e:?}");
+            warn!(op_id = op.id, "Failed to encode CoAP packet: {e:?}");
             let _ = op.response_tx.send(Err(LwM2mError::BadRequest));
             return;
         }
@@ -93,8 +93,9 @@ async fn dispatch_op(
         loop {
             set_tclass(&socket, TC_ENCRYPTED);
             if let Err(e) = socket.send_to(&bytes, addr).await {
-                warn!(%addr, "send_to failed: {e}");
+                warn!(%addr, "Failed to send: {e}");
                 if let Some(endpoint) = registry.set_device_offline(addr).await {
+                    info!(endpoint = %endpoint, "Device is offline");
                     event_sender.send_connection_status(&endpoint, false);
                 }
                 break;
@@ -113,10 +114,11 @@ async fn dispatch_op(
             if attempts >= MAX_RETRANSMIT {
                 // Final timeout: retrieve and fail the op.
                 if let Some(op) = registry.complete_in_flight(addr, &token).await {
-                    warn!(%addr, op_id = op.id, "CoAP retransmit exhausted, timing out op");
+                    warn!(%addr, op_id = op.id, "Device unreachable, operation timed out");
                     let _ = op.response_tx.send(Err(LwM2mError::Timeout));
                 }
                 if let Some(endpoint) = registry.set_device_offline(addr).await {
+                    info!(endpoint = %endpoint, "Device is offline");
                     event_sender.send_connection_status(&endpoint, false);
                 }
                 return;
