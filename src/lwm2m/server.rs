@@ -8,10 +8,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
-    bootstrap::{self, BootstrapRegistry},
+    lwm2m::{
+        bootstrap::{self, BootstrapRegistry},
+        ipso::IpsoModel,
+    },
     error::Result,
-    event::EventSender,
-    ipso::IpsoModel,
+    ipc::event::EventSender,
     model::{LwM2mError, PendingOperation, ResourceValue},
     persistence::PersistenceStore,
     registry::DeviceRegistry,
@@ -531,7 +533,7 @@ fn build_device_payload(
         return None;
     };
 
-    let ts = crate::event::unix_ts();
+    let ts = crate::ipc::event::unix_ts();
     let mut base_name = String::new();
 
     // obj_id → inst_id → res_id → (values, is_array)
@@ -593,7 +595,7 @@ fn build_device_payload(
             for (res_id, (values, path_is_array)) in resources {
                 let (res_name, res_type, def_is_array) = match obj_def.resources.get(res_id) {
                     Some(r) => (r.name.clone(), &r.resource_type, r.multiple_instances),
-                    None    => (res_id.to_string(), &crate::ipso::ResourceType::Integer, false),
+                    None    => (res_id.to_string(), &crate::lwm2m::ipso::ResourceType::Integer, false),
                 };
 
                 // Use array encoding when the IPSO def or the SenML path signals multi-instance.
@@ -633,11 +635,11 @@ fn parse_lwm2m_path(path: &str) -> Option<(u32, u32, u32, bool)> {
 
 fn encode_single_value(
     v: &SenmlValue,
-    res_type: &crate::ipso::ResourceType,
+    res_type: &crate::lwm2m::ipso::ResourceType,
     ts: u64,
 ) -> serde_json::Value {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    use crate::ipso::ResourceType::*;
+    use crate::lwm2m::ipso::ResourceType::*;
     match (v, res_type) {
         (SenmlValue::Int(i),   Time)    => serde_json::json!({"vt": *i, "ts": ts}),
         (SenmlValue::Int(i),   _)       => serde_json::json!({"vi": *i, "ts": ts}),
@@ -650,11 +652,11 @@ fn encode_single_value(
 
 fn encode_array_value(
     values: &[SenmlValue],
-    res_type: &crate::ipso::ResourceType,
+    res_type: &crate::lwm2m::ipso::ResourceType,
     ts: u64,
 ) -> serde_json::Value {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    use crate::ipso::ResourceType::*;
+    use crate::lwm2m::ipso::ResourceType::*;
     match res_type {
         String => {
             let arr: Vec<_> = values.iter()

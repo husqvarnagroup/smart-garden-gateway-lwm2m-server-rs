@@ -1,13 +1,9 @@
-pub mod bootstrap;
-pub mod console_fmt;
-pub mod syslog_layer;
-pub mod coap;
 pub mod config;
 pub mod error;
-pub mod event;
 pub mod housekeeping;
+pub mod logging;
 pub mod ipc;
-pub mod ipso;
+pub mod lwm2m;
 pub mod model;
 pub mod persistence;
 pub mod registry;

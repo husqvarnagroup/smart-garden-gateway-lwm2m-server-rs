@@ -8,18 +8,13 @@ use tracing_subscriber::{Layer as _, util::SubscriberInitExt as _, prelude::__tr
 use std::sync::Arc;
 
 use lwm2mserver_rs::{
-    bootstrap::BootstrapRegistry,
-    coap,
-    coap::server::DispatchRequest,
+    lwm2m::{self, bootstrap::BootstrapRegistry, ipso::IpsoModel, server::DispatchRequest},
     config::Config,
-    event::{self, EventSender},
     housekeeping,
-    ipc,
-    ipso::IpsoModel,
+    ipc::{command, event},
+    logging::{PrefixedFields, SyslogLayer},
     persistence::PersistenceStore,
     registry::DeviceRegistry,
-    console_fmt::PrefixedFields,
-    syslog_layer::SyslogLayer,
 };
 
 #[tokio::main]
@@ -50,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     let bootstrap_registry = BootstrapRegistry::new(cfg.network_key.clone(), Some(cfg.server_uri.clone()));
     let bootstrap_registry_hk = bootstrap_registry.clone();
     let bootstrap_registry_ipc = bootstrap_registry.clone();
-    let event_sender = EventSender::new();
+    let event_sender = event::EventSender::new();
     let cancel = CancellationToken::new();
 
     let persistence = Arc::new(PersistenceStore::new(
@@ -73,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
         registry.restore_device_state(&ep, state).await;
     }
 
-    let socket = coap::bind(cfg.coap_bind_addr, cfg.coap_interface.as_deref())
+    let socket = lwm2m::bind(cfg.coap_bind_addr, cfg.coap_interface.as_deref())
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -93,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Server starting");
 
     tokio::select! {
-        r = coap::server::run(
+        r = lwm2m::server::run(
             socket.clone(),
             registry.clone(),
             bootstrap_registry,
@@ -104,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap server: {e}"))? }
 
-        r = coap::client::run(
+        r = lwm2m::client::run(
             socket,
             registry.clone(),
             coap_dispatch_rx,
@@ -120,8 +115,8 @@ async fn main() -> anyhow::Result<()> {
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("housekeeping: {e}"))? }
 
-        r = ipc::run(
-            PathBuf::from(ipc::DEFAULT_SOCKET_PATH),
+        r = command::run(
+            PathBuf::from(command::DEFAULT_SOCKET_PATH),
             bootstrap_registry_ipc,
             registry,
             ipso,

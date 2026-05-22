@@ -398,62 +398,6 @@ src/
 │                       expire_stale()          — purges devices past lifetime + grace
 │                       merge_device_state_by_addr() — deep-merges /dp IPSO state
 │
-├── bootstrap.rs      BootstrapRegistry — drives device inclusion:
-│                       • Generates ephemeral P-256 keypair at startup
-│                       • Caches device X.509 certs permanently (cert never changes)
-│                       • Tracks pending GET /0/0 exchanges by token
-│                       • Stores user approval (approve_inclusion / is_approved /
-│                         consume_approval) — approval consumed on next /bs
-│                       • Assigns stable numeric IDs to endpoints for IPC references
-│                       • Performs ECDH key encapsulation for the network key
-│
-├── error.rs          Unified Error enum (thiserror).
-│
-├── ipso.rs           IpsoModel — loads IPSO object definition XML files at startup.
-│                     Keyed by (object_id, version). Provides get_versioned() for
-│                     version-aware lookup with unversioned fallback.
-│
-├── persistence.rs    PersistenceStore — atomic JSON persistence to
-│                     /var/lib/lwm2mserver/:
-│                       wakaama.json         — device registry snapshots
-│                       included_devices.json — included endpoint list
-│                       devices/<sgtin>.json — per-device IPSO state
-│
-├── ipc.rs            Command socket server on /tmp/lwm2mserver-command.ipc.
-│                     Handles newline-framed JSON requests:
-│                       read devices                           — list device states
-│                       execute includable_device/<id>/include — approve inclusion
-│                       execute <object>/<inst>/<resource>     — CoAP Execute
-│                       write   <object>/<inst>/<resource>     — CoAP Write
-│                     Resource names are resolved via IpsoModel; operations are
-│                     dispatched via coap_dispatch_tx and awaited (30 s timeout).
-│
-├── event.rs          Event socket server on /tmp/lwm2mserver-event.ipc.
-│                     Broadcasts events to all connected listeners via a tokio
-│                     broadcast channel. Events: includable_device, device_data,
-│                     connection_status, device_deleted.
-│
-├── coap/
-│   ├── mod.rs        UDP socket bind helper (socket2, SO_BINDTODEVICE).
-│   │                 sgtin_from_ep() — strips URN prefix from ep parameter.
-│   ├── server.rs     Inbound CoAP task. recv_from loop on [::]:20017.
-│   │                 Every packet calls registry.touch() first — this is the
-│   │                 sole path for marking a device online.
-│   │                 Handles:
-│   │                   POST /bs     — emit includable event; if approved: ACK +
-│   │                                  write phase; else: GET /0/0 if cert not cached
-│   │                   POST /rd     — device registration → 2.01 Created (TC=0x1c)
-│   │                   POST /rd/<id>— heartbeat → 2.04 Changed + drain ops (TC=0x1c)
-│   │                   POST /dp     — SenML+CBOR → IPSO-named event (TC=0x1c)
-│   │                   DELETE /rd/<id> — device self-deregistration (factory reset)
-│   │                   ACK          — bootstrap write-step or op oneshot completion
-│   │                   RST          — op oneshot fires with CoapError
-│   └── client.rs     Outbound CoAP task. Receives DispatchRequest from channel,
-│                     builds CON requests, retransmits up to 3× with exponential
-│                     backoff (2 s initial, RFC 7252 defaults). On send failure or
-│                     final timeout: calls registry.set_device_offline() and emits
-│                     a connection_status event.
-│
 ├── housekeeping.rs   60-second interval task:
 │                       • Expire stale device registrations (lifetime + 30 s grace)
 │                       • Timeout in-flight ops (> 60 s)
@@ -463,40 +407,95 @@ src/
 │                         devices once per day when idle. Runs on first tick to
 │                         probe all restored devices at startup.
 │
-├── console_fmt.rs    Custom tracing formatter: prefixes structured fields before
-│                     the message — `TIMESTAMP LEVEL target: [k=v …] message`.
+├── error.rs          Unified Error enum (thiserror).
 │
-└── syslog_layer.rs   RFC 5424 syslog tracing layer. Active when JOURNAL_STREAM is
-                      set (systemd). Emits structured data in the bnw@55029 SD-ID;
-                      suppresses the plain fmt layer to avoid duplicate output.
+├── persistence.rs    PersistenceStore — atomic JSON persistence to
+│                     /var/lib/lwm2mserver/:
+│                       wakaama.json          — device registry snapshots
+│                       included_devices.json — included endpoint list
+│                       devices/<sgtin>.json  — per-device IPSO state
+│
+├── lwm2m/            Device-facing block: CoAP transport + LWM2M protocol.
+│   ├── mod.rs        UDP socket bind helper (socket2, SO_BINDTODEVICE).
+│   │                 sgtin_from_ep() — strips URN prefix from ep= parameter.
+│   │                 TC_PLAIN / TC_ENCRYPTED traffic-class constants.
+│   ├── server.rs     Inbound CoAP task. recv_from loop on [::]:20017.
+│   │                 Every packet calls registry.touch() first — this is the
+│   │                 sole path for marking a device online.
+│   │                 Handles:
+│   │                   POST /bs        — emit includable event; if approved: ACK +
+│   │                                    write phase; else: GET /0/0 if cert not cached
+│   │                   POST /rd        — device registration → 2.01 Created (TC=0x1c)
+│   │                   POST /rd/<id>   — heartbeat → 2.04 Changed + drain ops (TC=0x1c)
+│   │                   POST /dp        — SenML+CBOR → IPSO-named event (TC=0x1c)
+│   │                   DELETE /rd/<id> — device self-deregistration (factory reset)
+│   │                   ACK             — bootstrap write-step or op oneshot completion
+│   │                   RST             — op oneshot fires with CoapError
+│   ├── client.rs     Outbound CoAP task. Receives DispatchRequest from channel,
+│   │                 builds CON requests, retransmits up to 3× with exponential
+│   │                 backoff (2 s initial, RFC 7252 defaults). On send failure or
+│   │                 final timeout: calls registry.set_device_offline() and emits
+│   │                 a connection_status event.
+│   ├── bootstrap.rs  BootstrapRegistry — drives device inclusion:
+│   │                   • Generates ephemeral P-256 keypair at startup
+│   │                   • Caches device X.509 certs permanently (cert never changes)
+│   │                   • Tracks pending GET /0/0 exchanges by token
+│   │                   • Stores user approval (approve_inclusion / is_approved /
+│   │                     consume_approval) — approval consumed on next /bs
+│   │                   • Assigns stable numeric IDs to endpoints for IPC references
+│   │                   • Performs ECDH key encapsulation for the network key
+│   └── ipso.rs       IpsoModel — loads IPSO object definition XML files at startup.
+│                     Keyed by (object_id, version). Provides get_versioned() for
+│                     version-aware lookup with unversioned fallback.
+│
+├── ipc/              Service-facing block: Unix domain socket IPC.
+│   ├── command.rs    Command socket on /tmp/lwm2mserver-command.ipc.
+│   │                 Handles newline-framed JSON requests:
+│   │                   read devices                           — list device states
+│   │                   execute includable_device/<id>/include — approve inclusion
+│   │                   execute <object>/<inst>/<resource>     — CoAP Execute
+│   │                   write   <object>/<inst>/<resource>     — CoAP Write
+│   │                 Resource names are resolved via IpsoModel; operations are
+│   │                 dispatched via coap_dispatch_tx and awaited (30 s timeout).
+│   └── event.rs      Event socket on /tmp/lwm2mserver-event.ipc.
+│                     Broadcasts events to all connected listeners via a tokio
+│                     broadcast channel. Events: includable_device, device_data,
+│                     connection_status, device_deleted.
+│
+└── logging/          Tracing infrastructure.
+    ├── console_fmt.rs  Custom formatter: prefixes structured fields before the
+    │                   message — `TIMESTAMP LEVEL target: [k=v …] message`.
+    └── syslog_layer.rs RFC 5424 syslog layer. Active when JOURNAL_STREAM is set
+                        (systemd). Emits structured data in the bnw@55029 SD-ID;
+                        suppresses the plain fmt layer to avoid duplicate output.
 ```
 
 ### Task topology
 
 ```
                       ┌──────────────────────────────────────┐
-UDP :20017 ───────────►│ coap_server_task                     │
+UDP :20017 ───────────►│ lwm2m::server (inbound CoAP)         │
                       │   recv_from loop                     │──► coap_dispatch_tx
                       │   /bs / /rd / /dp / DELETE / ACK/RST │──► event_sender (broadcast)
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
-                      │ coap_dispatch_task                    │◄── coap_dispatch_tx
+                      │ lwm2m::client (outbound CoAP)         │◄── coap_dispatch_tx
                       │   send CON requests, retransmit loop │──► event_sender (connection_status)
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
-/tmp/…-command.ipc ──►│ ipc_task                             │
+/tmp/…-command.ipc ──►│ ipc::command                         │
                       │   read / execute / write             │──► coap_dispatch_tx
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
-/tmp/…-event.ipc  ◄───│ event_task                           │◄── event_sender (broadcast)
+/tmp/…-event.ipc  ◄───│ ipc::event                           │◄── event_sender (broadcast)
                       │   fan-out to connected listeners     │
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
-                      │ housekeeping_task (60 s interval)     │
+                      │ housekeeping (60 s interval)          │
                       │   expire registrations, timeout ops, │──► coap_dispatch_tx
                       │   connectivity pings                  │
                       └──────────────────────────────────────┘

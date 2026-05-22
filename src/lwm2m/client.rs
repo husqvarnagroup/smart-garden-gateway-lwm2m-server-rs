@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     error::Result,
-    event::EventSender,
+    ipc::event::EventSender,
     model::{LwM2mCommand, LwM2mError, PendingOperation},
     registry::DeviceRegistry,
 };
