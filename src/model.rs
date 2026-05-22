@@ -88,6 +88,10 @@ pub struct Device {
     pub state: serde_json::Value,
     /// None = unknown, Some(true) = online, Some(false) = offline.
     pub online: Option<bool>,
+    /// When the device transitioned to offline; used to bound the 6-hour retry window.
+    pub offline_since: Option<Instant>,
+    /// When we last sent a connectivity ping; used to pace ping scheduling.
+    pub last_ping_attempt: Option<Instant>,
     /// Operations waiting to be sent on next device contact.
     pub pending_ops: VecDeque<PendingOperation>,
     /// Operations sent but awaiting CoAP ACK, keyed by 8-byte token.
@@ -120,6 +124,8 @@ impl Device {
             binding_mode,
             state: serde_json::Value::Object(serde_json::Map::new()),
             online: Some(true),
+            offline_since: None,
+            last_ping_attempt: None,
             pending_ops: VecDeque::new(),
             in_flight: HashMap::new(),
         }

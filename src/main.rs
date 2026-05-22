@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (coap_dispatch_tx, coap_dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
     let coap_dispatch_tx_ipc = coap_dispatch_tx.clone();
+    let coap_dispatch_tx_hk = coap_dispatch_tx.clone();
 
     {
         let cancel = cancel.clone();
@@ -114,6 +115,8 @@ async fn main() -> anyhow::Result<()> {
         r = housekeeping::run(
             registry.clone(),
             bootstrap_registry_hk,
+            coap_dispatch_tx_hk,
+            ipso.clone(),
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("housekeeping: {e}"))? }
 

@@ -110,6 +110,7 @@ impl DeviceRegistry {
         dev.addr = addr;
         if dev.online != Some(true) {
             dev.online = Some(true);
+            dev.offline_since = None;
             Some(dev.endpoint.clone())
         } else {
             None
@@ -123,10 +124,51 @@ impl DeviceRegistry {
         let dev = inner.by_id.get_mut(&id)?;
         if dev.online == Some(true) {
             dev.online = Some(false);
+            dev.offline_since = Some(std::time::Instant::now());
             Some(dev.endpoint.clone())
         } else {
             None
         }
+    }
+
+    /// Collect devices that need a connectivity ping and mark them as attempted.
+    ///
+    /// - Online devices are pinged when no contact for `online_interval`.
+    /// - Offline devices are pinged every `offline_interval` within `offline_max_duration`
+    ///   of going offline.
+    pub async fn take_ping_candidates(
+        &self,
+        offline_interval: std::time::Duration,
+        online_interval: std::time::Duration,
+        offline_max_duration: std::time::Duration,
+    ) -> Vec<(String, std::net::SocketAddr)> {
+        let mut inner = self.inner.write().await;
+        let now = std::time::Instant::now();
+        let mut candidates = Vec::new();
+
+        for dev in inner.by_id.values_mut() {
+            let needs_ping = match dev.online {
+                Some(true) => {
+                    dev.last_contact.elapsed() >= online_interval
+                        && dev.last_ping_attempt.map_or(true, |t| t.elapsed() >= online_interval)
+                }
+                Some(false) => {
+                    let within_window = dev
+                        .offline_since
+                        .map_or(false, |t| t.elapsed() < offline_max_duration);
+                    within_window
+                        && dev.last_ping_attempt.map_or(true, |t| t.elapsed() >= offline_interval)
+                }
+                None => false,
+            };
+
+            if needs_ping {
+                dev.last_ping_attempt = Some(now);
+                candidates.push((dev.endpoint.clone(), dev.addr));
+            }
+        }
+
+        candidates
     }
 
     /// Drain all pending operations for the device at `addr`.
@@ -269,19 +311,22 @@ impl DeviceRegistry {
             if s.id >= inner.next_id {
                 inner.next_id = s.id + 1;
             }
+            let now = std::time::Instant::now();
             let dev = crate::model::Device {
                 id: s.id,
                 endpoint: s.endpoint.clone(),
                 addr: s.addr,
                 lifetime: s.lifetime,
-                registered_at: std::time::Instant::now(),
-                last_contact: std::time::Instant::now(),
+                registered_at: now,
+                last_contact: now,
                 objects: s.objects,
                 object_versions: s.object_versions,
                 lwm2m_version: s.lwm2m_version,
                 binding_mode: s.binding_mode,
                 state: serde_json::Value::Object(serde_json::Map::new()),
                 online: Some(false),
+                offline_since: Some(now),
+                last_ping_attempt: None,
                 pending_ops: std::collections::VecDeque::new(),
                 in_flight: std::collections::HashMap::new(),
             };
