@@ -75,6 +75,8 @@ pub struct Device {
     /// Lifetime declared by the device at registration (seconds).
     pub lifetime: u32,
     pub registered_at: Instant,
+    /// Reset on every POST /rd (new) and POST /rd/<id> (update). Drives expiry.
+    pub last_registered_at: Instant,
     pub last_contact: Instant,
     /// Object links reported at registration, e.g. ["3/0", "4/0"].
     pub objects: Vec<String>,
@@ -117,6 +119,7 @@ impl Device {
             addr,
             lifetime,
             registered_at: now,
+            last_registered_at: now,
             last_contact: now,
             objects,
             object_versions,
@@ -134,7 +137,7 @@ impl Device {
     /// True if the device registration has expired (plus a grace period).
     pub fn is_expired(&self, grace_secs: u32) -> bool {
         let total = self.lifetime as u64 + grace_secs as u64;
-        self.last_contact.elapsed().as_secs() > total
+        self.last_registered_at.elapsed().as_secs() > total
     }
 }
 

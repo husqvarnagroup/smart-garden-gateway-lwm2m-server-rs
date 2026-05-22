@@ -424,6 +424,11 @@ async fn handle_update(
 ) -> Result<()> {
     send_encrypted_response(socket, addr, &packet, Status::Changed, None).await?;
 
+    // Always reset the expiry timer; apply a new lifetime if lt= was included.
+    let query = uri_query(&packet);
+    let new_lt = parse_query(&query).get("lt").and_then(|v| v.parse::<u32>().ok());
+    registry.renew_registration(addr, new_lt).await;
+
     // Drain pending ops and hand them to the dispatch task.
     let ops = registry.drain_pending(addr).await;
     if !ops.is_empty() {

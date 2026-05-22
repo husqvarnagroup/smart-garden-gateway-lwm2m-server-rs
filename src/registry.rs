@@ -84,6 +84,7 @@ impl DeviceRegistry {
             dev.binding_mode = binding_mode;
             let now = std::time::Instant::now();
             dev.registered_at = now;
+            dev.last_registered_at = now;
             dev.last_contact = now;
             info!(device = %endpoint, id, activity = "registration", "Device registered");
             return id;
@@ -99,6 +100,20 @@ impl DeviceRegistry {
 
         info!(device = %endpoint, id, activity = "registration", "New device registered");
         id
+    }
+
+    /// Record a registration update (POST /rd/<id>): reset the expiry timer and
+    /// optionally apply a new lifetime when the device included lt= in the request.
+    pub async fn renew_registration(&self, addr: SocketAddr, new_lifetime: Option<u32>) {
+        let mut inner = self.inner.write().await;
+        if let Some(&id) = inner.by_addr.get(&addr) {
+            if let Some(dev) = inner.by_id.get_mut(&id) {
+                dev.last_registered_at = std::time::Instant::now();
+                if let Some(lt) = new_lifetime {
+                    dev.lifetime = lt;
+                }
+            }
+        }
     }
 
     /// Update last-contact timestamp. Returns the endpoint if the device just came online.
@@ -287,7 +302,7 @@ impl DeviceRegistry {
             .unwrap_or_default()
             .as_secs();
         inner.by_id.values().map(|dev| {
-            let elapsed = dev.last_contact.elapsed().as_secs();
+            let elapsed = dev.last_registered_at.elapsed().as_secs();
             let remaining = dev.lifetime.saturating_sub(elapsed as u32);
             DeviceSnapshot {
                 id: dev.id,
@@ -318,6 +333,7 @@ impl DeviceRegistry {
                 addr: s.addr,
                 lifetime: s.lifetime,
                 registered_at: now,
+                last_registered_at: now,
                 last_contact: now,
                 objects: s.objects,
                 object_versions: s.object_versions,
