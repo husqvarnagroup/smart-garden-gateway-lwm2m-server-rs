@@ -121,7 +121,7 @@ pub async fn run(path: PathBuf, events: EventSender, cancel: CancellationToken) 
             result = listener.accept() => {
                 match result {
                     Ok((stream, _)) => {
-                        tokio::spawn(relay_to_client(stream, events.subscribe()));
+                        tokio::spawn(relay_to_client(stream, events.subscribe(), cancel.clone()));
                     }
                     Err(e) => warn!("Event socket accept: {e}"),
                 }
@@ -130,17 +130,29 @@ pub async fn run(path: PathBuf, events: EventSender, cancel: CancellationToken) 
     }
 }
 
-async fn relay_to_client(stream: tokio::net::UnixStream, mut rx: broadcast::Receiver<String>) {
+async fn relay_to_client(
+    stream: tokio::net::UnixStream,
+    mut rx: broadcast::Receiver<String>,
+    cancel: CancellationToken,
+) {
     let (_, mut writer) = tokio::io::split(stream);
     loop {
-        match rx.recv().await {
-            Ok(msg) => {
-                if writer.write_all(msg.as_bytes()).await.is_err() {
-                    break;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                let _ = writer.shutdown().await;
+                break;
+            }
+            result = rx.recv() => {
+                match result {
+                    Ok(msg) => {
+                        if writer.write_all(msg.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {}
-            Err(broadcast::error::RecvError::Closed) => break,
         }
     }
 }
