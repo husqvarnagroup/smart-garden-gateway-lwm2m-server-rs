@@ -91,7 +91,7 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
 
     if let Some(endpoint) = ctx.registry.touch(addr).await {
-        info!(endpoint = %endpoint, "Device is online");
+        info!(device = %endpoint, "Device is online");
         ctx.event_sender.send_connection_status(&endpoint, true);
     }
 
@@ -167,13 +167,13 @@ async fn handle_delete(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) ->
     };
 
     let was_included = ctx.bootstrap_registry.is_included(&endpoint).await;
-    info!(%endpoint, "Device is offline");
+    info!(device = %endpoint, "Device is offline");
     ctx.bootstrap_registry.unmark_included(&endpoint).await;
     if was_included {
-        info!(%endpoint, "Device excluded");
-        info!(%endpoint, "Device deregistered");
+        info!(device = %endpoint, "Device excluded");
+        info!(device = %endpoint, "Device deregistered");
     } else {
-        info!(%endpoint, "Device which was not included is now disconnected");
+        info!(device = %endpoint, "Device which was not included is now disconnected");
     }
     let included = ctx.bootstrap_registry.included_list().await;
     let snapshots = ctx.registry.snapshot().await;
@@ -215,17 +215,17 @@ async fn handle_bootstrap(
     // Every /bs gets an event — assign a stable ID first.
     let id = bootstrap_registry.ensure_includable_id(&endpoint).await;
     event_sender.send_includable(id, &endpoint, false, false);
-    info!(%endpoint, id, %addr, "Received device inclusion request");
+    info!(device = %endpoint, id, %addr, "Received device inclusion request");
 
     // Case 1: user has approved — ACK, consume approval, start write phase.
     if bootstrap_registry.is_approved(&endpoint).await {
         bootstrap_registry.consume_approval(&endpoint).await;
         let bytes = make_response_bytes(&packet, Status::Changed, None)?;
         send_bootstrap_packet(socket, &bytes, addr).await?;
-        info!(%endpoint, "Start inclusion");
+        info!(device = %endpoint, "Start inclusion");
 
         let Some(server_uri) = bootstrap_registry.server_uri().map(str::to_owned) else {
-            warn!(%endpoint, "Bootstrap: SERVER_URI not configured — skipping write phase");
+            warn!(device = %endpoint, "Bootstrap: SERVER_URI not configured — skipping write phase");
             return Ok(());
         };
 
@@ -247,10 +247,10 @@ async fn handle_bootstrap(
                     tokio::spawn(async move {
                         let _ = tokio::task::spawn_blocking(move || ps2.save_included(&included)).await;
                     });
-                    info!(endpoint = %ep, "Inclusion completed");
+                    info!(device = %ep, "Inclusion completed");
                 }
                 Err(e) => {
-                    error!(endpoint = %ep, "Bootstrap write phase failed: {e}");
+                    error!(device = %ep, "Bootstrap write phase failed: {e}");
                     br.remove_includable_id(&ep).await;
                 }
             }
@@ -261,10 +261,10 @@ async fn handle_bootstrap(
     // Case 2: cert not yet cached — start GET /0/0 if not already in flight.
     if !bootstrap_registry.has_cert(&endpoint).await {
         let Some((token, mid)) = bootstrap_registry.begin(endpoint.clone(), addr).await else {
-            info!(%endpoint, "Bootstrap: GET /0/0 already in flight");
+            info!(device = %endpoint, "Bootstrap: GET /0/0 already in flight");
             return Ok(());
         };
-        info!(%endpoint, "Device needs authentication");
+        info!(device = %endpoint, "Device needs authentication");
 
         // Device needs ~3 s after sending /bs to open its receive socket.
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -281,7 +281,7 @@ async fn handle_bootstrap(
             .to_bytes()
             .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
         send_bootstrap_packet(socket, &bytes, addr).await?;
-        info!(%endpoint, "Bootstrap read security object");
+        info!(device = %endpoint, "Bootstrap read security object");
     }
     // else: cert cached, awaiting user approval — event already emitted, nothing more to do.
 
@@ -362,7 +362,7 @@ async fn handle_registration(
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
     send_encrypted_packet(socket, &bytes, addr).await?;
 
-    info!(%endpoint, id, %addr, "Device registered");
+    info!(device = %endpoint, id, %addr, "Device registered");
 
     let snapshots = registry.snapshot().await;
     let ps = Arc::clone(persistence);
@@ -408,7 +408,7 @@ async fn handle_ack(
     if bootstrap_registry.is_pending(&token).await {
         if let Some(session) = bootstrap_registry.complete(&token, packet.payload.clone()).await {
             info!(
-                endpoint = %session.endpoint,
+                device = %session.endpoint,
                 bytes = session.pubkey_payload.as_ref().map_or(0, |p| p.len()),
                 "Device available for inclusion"
             );
@@ -462,7 +462,7 @@ async fn handle_dp(
                             .unwrap_or_default()
                     })
                     .collect();
-                info!(endpoint = %endpoint, "Reported object instance(s): {}", instances.join(", "));
+                info!(device = %endpoint, "Reported object instance(s): {}", instances.join(", "));
                 for (obj, insts) in objs {
                     if let Some(inst_map) = insts.as_object() {
                         for (inst, resources) in inst_map {
@@ -471,7 +471,7 @@ async fn handle_dp(
                                 for (res, val) in res_map {
                                     if res == "_urn" { continue; }
                                     let formatted = format_resource_value(val);
-                                    info!(endpoint = %endpoint, "Reported resource {obj}/{inst}/{res} as {formatted}");
+                                    info!(device = %endpoint, "Reported resource {obj}/{inst}/{res} as {formatted}");
                                 }
                             }
                         }
@@ -486,7 +486,7 @@ async fn handle_dp(
                 let _ = tokio::task::spawn_blocking(move || ps.save_device_state(&ep, &state)).await;
             });
         }
-        None => warn!(%addr, endpoint = %endpoint, "No known objects in /dp payload"),
+        None => warn!(%addr, device = %endpoint, "No known objects in /dp payload"),
     }
 
     Ok(())
@@ -704,7 +704,7 @@ async fn bootstrap_write_phase(
     registry: BootstrapRegistry,
     server_uri: String,
 ) -> Result<()> {
-    info!(%endpoint, "Bootstrap start");
+    info!(device = %endpoint, "Bootstrap start");
 
     let server_pubkey = registry.server_pubkey_bytes().to_vec();
     let network_key = registry.network_key().to_vec();
@@ -712,35 +712,35 @@ async fn bootstrap_write_phase(
 
     // Step 1 — DELETE /1 (clear existing Server Object instances)
     {
-        info!(%endpoint, "Bootstrap delete server object");
+        info!(device = %endpoint, "Bootstrap delete server object");
         let (token, mid) = registry.alloc_token_mid().await;
         let pkt = build_delete(mid, &token[..4], &["1"])?;
         send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
-        info!(%endpoint, "Bootstrap server object deleted");
+        info!(device = %endpoint, "Bootstrap server object deleted");
     }
 
     // Step 2 — PUT /1/1 (LWM2M Server Object: lifetime, binding, server ID)
     {
-        info!(%endpoint, "Bootstrap write server object");
+        info!(device = %endpoint, "Bootstrap write server object");
         let (token, mid) = registry.alloc_token_mid().await;
         let payload = bootstrap::encode_server_object();
         let pkt = build_put(mid, &token[..4], &["1", "1"], SENML_CBOR, payload)?;
         send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
-        info!(%endpoint, "Bootstrap write server object done");
+        info!(device = %endpoint, "Bootstrap write server object done");
     }
 
     // Step 3 — DELETE /0 (clear existing Security Object instances)
     {
-        info!(%endpoint, "Bootstrap delete security object");
+        info!(device = %endpoint, "Bootstrap delete security object");
         let (token, mid) = registry.alloc_token_mid().await;
         let pkt = build_delete(mid, &token[..4], &["0"])?;
         send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
-        info!(%endpoint, "Bootstrap security object deleted");
+        info!(device = %endpoint, "Bootstrap security object deleted");
     }
 
     // Step 4 — PUT /0/1 (LWM2M Security Object: URI, server pubkey, encrypted network key)
     {
-        info!(%endpoint, "Bootstrap write security object");
+        info!(device = %endpoint, "Bootstrap write security object");
         let device_pubkey_payload = registry
             .get_cert(&endpoint)
             .await
@@ -754,7 +754,7 @@ async fn bootstrap_write_phase(
             bootstrap::encode_security_object(&server_uri, &server_pubkey, &encrypted_key);
         let pkt = build_put(mid, &token[..4], &["0", "1"], SENML_CBOR, payload)?;
         send_con_write_step(&socket, &pkt, addr, token, &registry).await?;
-        info!(%endpoint, "Bootstrap write security object done");
+        info!(device = %endpoint, "Bootstrap write security object done");
     }
 
     // Step 5 — POST /bs (bootstrap finish signal; device switches to encrypted traffic)

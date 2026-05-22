@@ -131,7 +131,7 @@ impl BootstrapRegistry {
             },
         );
 
-        tracing::debug!(%endpoint, %device_addr, token = hex(&token[..4]), "Bootstrap session started");
+        tracing::debug!(device = %endpoint, %device_addr, token = hex(&token[..4]), "Bootstrap session started");
         Some((token, mid))
     }
 
@@ -142,7 +142,7 @@ impl BootstrapRegistry {
         if let Some(mut session) = inner.by_token.remove(token) {
             inner.by_endpoint.remove(&session.endpoint);
             info!(
-                endpoint = %session.endpoint,
+                device = %session.endpoint,
                 bytes = payload.len(),
                 "Bootstrap read security object done"
             );
@@ -231,7 +231,7 @@ impl BootstrapRegistry {
         for token in stale {
             if let Some(s) = inner.by_token.remove(&token) {
                 inner.by_endpoint.remove(&s.endpoint);
-                warn!(endpoint = %s.endpoint, "Bootstrap session timed out");
+                warn!(device = %s.endpoint, "Bootstrap session timed out");
             }
         }
     }
@@ -262,7 +262,7 @@ impl BootstrapRegistry {
         let mut inner = self.inner.lock().await;
         let endpoint = inner.includable_by_id.get(&id)?.clone();
         inner.approved.insert(endpoint.clone());
-        info!(endpoint = %endpoint, id, "Bootstrap: inclusion approved, awaiting next /bs");
+        info!(device = %endpoint, id, "Bootstrap: inclusion approved, awaiting next /bs");
         Some(endpoint)
     }
 

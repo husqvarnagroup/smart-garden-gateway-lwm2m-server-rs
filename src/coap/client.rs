@@ -95,7 +95,7 @@ async fn dispatch_op(
             if let Err(e) = socket.send_to(&bytes, addr).await {
                 warn!(%addr, "Failed to send: {e}");
                 if let Some(endpoint) = registry.set_device_offline(addr).await {
-                    info!(endpoint = %endpoint, "Device is offline");
+                    info!(device = %endpoint, "Device is offline");
                     event_sender.send_connection_status(&endpoint, false);
                 }
                 break;
@@ -118,7 +118,7 @@ async fn dispatch_op(
                     let _ = op.response_tx.send(Err(LwM2mError::Timeout));
                 }
                 if let Some(endpoint) = registry.set_device_offline(addr).await {
-                    info!(endpoint = %endpoint, "Device is offline");
+                    info!(device = %endpoint, "Device is offline");
                     event_sender.send_connection_status(&endpoint, false);
                 }
                 return;

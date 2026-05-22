@@ -131,7 +131,7 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
             match middle.parse::<u32>() {
                 Ok(id) => match ctx.bootstrap_registry.approve_inclusion(id).await {
                     Some(endpoint) => {
-                        info!(%endpoint, id, "IPC: inclusion approved");
+                        info!(device = %endpoint, id, "IPC: inclusion approved");
                         serde_json::json!({"success": true})
                     }
                     None => {

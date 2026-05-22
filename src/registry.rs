@@ -179,7 +179,7 @@ impl DeviceRegistry {
         let mut removed = Vec::new();
         for id in expired {
             if let Some(dev) = inner.by_id.remove(&id) {
-                warn!(endpoint = %dev.endpoint, "Registration expired, removing device");
+                warn!(device = %dev.endpoint, "Registration expired, removing device");
                 inner.by_endpoint.remove(&dev.endpoint);
                 inner.by_addr.remove(&dev.addr);
 
@@ -230,7 +230,7 @@ impl DeviceRegistry {
 
             for token in timed_out {
                 if let Some(op) = dev.in_flight.remove(&token) {
-                    warn!(endpoint = %dev.endpoint, op_id = op.id, "In-flight op timed out");
+                    warn!(device = %dev.endpoint, op_id = op.id, "In-flight op timed out");
                     let _ = op.response_tx.send(Err(LwM2mError::Timeout));
                 }
             }
