@@ -34,7 +34,12 @@ where
         write!(writer, " ")?;
 
         if ansi {
-            write!(writer, "\x1b[{}m{:>5}\x1b[0m ", level_color(*meta.level()), meta.level())?;
+            write!(
+                writer,
+                "\x1b[{}m{:>5}\x1b[0m ",
+                level_color(*meta.level()),
+                meta.level()
+            )?;
         } else {
             write!(writer, "{:>5} ", meta.level())?;
         }
@@ -47,7 +52,9 @@ where
         if !visitor.fields.is_empty() {
             write!(writer, "[")?;
             for (i, (k, v)) in visitor.fields.iter().enumerate() {
-                if i > 0 { write!(writer, " ")?; }
+                if i > 0 {
+                    write!(writer, " ")?;
+                }
                 write!(writer, "{k}={v}")?;
             }
             write!(writer, "] ")?;
@@ -60,8 +67,8 @@ where
 fn level_color(level: Level) -> &'static str {
     match level {
         Level::ERROR => "31",
-        Level::WARN  => "33",
-        Level::INFO  => "32",
+        Level::WARN => "33",
+        Level::INFO => "32",
         Level::DEBUG => "34",
         Level::TRACE => "36",
     }

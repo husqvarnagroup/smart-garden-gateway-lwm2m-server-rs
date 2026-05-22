@@ -4,7 +4,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UdpSocket;
 
-use coap_lite::{CoapOption, MessageClass, MessageType, Packet, RequestType as Method, ResponseType as Status};
+use coap_lite::{
+    CoapOption, MessageClass, MessageType, Packet, RequestType as Method, ResponseType as Status,
+};
 
 fn registration_packet() -> Vec<u8> {
     let mut pkt = Packet::new();
@@ -24,7 +26,9 @@ async fn coap_registration_returns_created() {
     let gw = common::TestGateway::start().await;
 
     let sock = UdpSocket::bind("[::1]:0").await.unwrap();
-    sock.send_to(&registration_packet(), gw.coap_addr).await.unwrap();
+    sock.send_to(&registration_packet(), gw.coap_addr)
+        .await
+        .unwrap();
 
     let mut buf = vec![0u8; 256];
     let (len, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
@@ -45,7 +49,10 @@ async fn coap_registration_returns_created() {
         .unwrap_or_default();
 
     assert_eq!(location.first().map(String::as_str), Some("rd"));
-    assert!(location.get(1).is_some(), "expected numeric registration id");
+    assert!(
+        location.get(1).is_some(),
+        "expected numeric registration id"
+    );
 
     gw.stop().await;
 }
@@ -56,7 +63,9 @@ async fn coap_registration_then_ipc_read_devices() {
 
     // Register a device via CoAP.
     let sock = UdpSocket::bind("[::1]:0").await.unwrap();
-    sock.send_to(&registration_packet(), gw.coap_addr).await.unwrap();
+    sock.send_to(&registration_packet(), gw.coap_addr)
+        .await
+        .unwrap();
     let mut buf = vec![0u8; 256];
     tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
         .await
@@ -69,7 +78,9 @@ async fn coap_registration_then_ipc_read_devices() {
     let (reader, mut writer) = tokio::io::split(stream);
 
     writer
-        .write_all(b"[{\"op\":\"read\",\"entity\":{\"service\":\"lwm2mserver\",\"path\":\"devices\"}}]\n")
+        .write_all(
+            b"[{\"op\":\"read\",\"entity\":{\"service\":\"lwm2mserver\",\"path\":\"devices\"}}]\n",
+        )
         .await
         .unwrap();
 
@@ -101,7 +112,9 @@ async fn coap_deregister_included_device_preserves_inclusion() {
 
     // Register the device.
     let sock = UdpSocket::bind("[::1]:0").await.unwrap();
-    sock.send_to(&registration_packet(), gw.coap_addr).await.unwrap();
+    sock.send_to(&registration_packet(), gw.coap_addr)
+        .await
+        .unwrap();
 
     let mut buf = vec![0u8; 256];
     let (len, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
@@ -110,7 +123,10 @@ async fn coap_deregister_included_device_preserves_inclusion() {
         .unwrap();
 
     let reg_resp = Packet::from_bytes(&buf[..len]).unwrap();
-    assert_eq!(reg_resp.header.code, MessageClass::Response(Status::Created));
+    assert_eq!(
+        reg_resp.header.code,
+        MessageClass::Response(Status::Created)
+    );
 
     // Extract the numeric registration ID from the Location-Path response.
     let reg_id = reg_resp
@@ -127,14 +143,19 @@ async fn coap_deregister_included_device_preserves_inclusion() {
     del.set_token(vec![0x02]);
     del.add_option(CoapOption::UriPath, b"rd".to_vec());
     del.add_option(CoapOption::UriPath, reg_id.into_bytes());
-    sock.send_to(&del.to_bytes().unwrap(), gw.coap_addr).await.unwrap();
+    sock.send_to(&del.to_bytes().unwrap(), gw.coap_addr)
+        .await
+        .unwrap();
 
     let (len, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
         .await
         .expect("delete response timeout")
         .unwrap();
     let del_resp = Packet::from_bytes(&buf[..len]).unwrap();
-    assert_eq!(del_resp.header.code, MessageClass::Response(Status::Deleted));
+    assert_eq!(
+        del_resp.header.code,
+        MessageClass::Response(Status::Deleted)
+    );
 
     // Give the server a moment to process.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -149,11 +170,19 @@ async fn coap_deregister_included_device_preserves_inclusion() {
     let mut delete_event_sent = false;
     while let Ok(msg) = events.try_recv() {
         let json: serde_json::Value = serde_json::from_str(&msg).unwrap_or_default();
-        if json.get(0).and_then(|e| e.get("op")).map(|op| op == "delete").unwrap_or(false) {
+        if json
+            .get(0)
+            .and_then(|e| e.get("op"))
+            .map(|op| op == "delete")
+            .unwrap_or(false)
+        {
             delete_event_sent = true;
         }
     }
-    assert!(!delete_event_sent, "delete event must not be emitted for a device-initiated deregistration");
+    assert!(
+        !delete_event_sent,
+        "delete event must not be emitted for a device-initiated deregistration"
+    );
 
     gw.stop().await;
 }

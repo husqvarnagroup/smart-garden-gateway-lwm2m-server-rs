@@ -30,7 +30,10 @@ impl Default for EventSender {
 impl EventSender {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(256);
-        Self { tx, seq: Arc::new(AtomicU32::new(0)) }
+        Self {
+            tx,
+            seq: Arc::new(AtomicU32::new(0)),
+        }
     }
 
     /// Emit an `includable_device/<id>` update to all connected clients.

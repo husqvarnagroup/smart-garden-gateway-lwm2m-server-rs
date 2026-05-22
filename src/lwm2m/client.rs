@@ -3,7 +3,11 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use coap_lite::{
     CoapOption, MessageClass, MessageType, Packet, RequestType as Method, ResponseType as Status,
 };
-use tokio::{net::UdpSocket, sync::{mpsc, oneshot}, time::sleep};
+use tokio::{
+    net::UdpSocket,
+    sync::{mpsc, oneshot},
+    time::sleep,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -68,10 +72,17 @@ async fn dispatch_op(
             let max_blocks = value.len().div_ceil(BLOCK_THRESHOLD);
             let start_mid = *mid_counter;
             *mid_counter = mid_counter.wrapping_add(max_blocks as u16);
-            if *mid_counter == 0 { *mid_counter = 1; }
+            if *mid_counter == 0 {
+                *mid_counter = 1;
+            }
             tokio::spawn(dispatch_block_write(
-                socket.clone(), registry.clone(), block_acks.clone(),
-                addr, op, event_sender.clone(), start_mid,
+                socket.clone(),
+                registry.clone(),
+                block_acks.clone(),
+                addr,
+                op,
+                event_sender.clone(),
+                start_mid,
             ));
             return;
         }
@@ -166,9 +177,18 @@ async fn dispatch_block_write(
     event_sender: EventSender,
     start_mid: u16,
 ) {
-    let PendingOperation { id: op_id, command, response_tx, .. } = op;
+    let PendingOperation {
+        id: op_id,
+        command,
+        response_tx,
+        ..
+    } = op;
     let (path, payload, content_format) = match command {
-        LwM2mCommand::Write { path, value, content_format } => (path, value, content_format),
+        LwM2mCommand::Write {
+            path,
+            value,
+            content_format,
+        } => (path, value, content_format),
         _ => unreachable!("dispatch_block_write called with non-Write command"),
     };
 
@@ -193,16 +213,28 @@ async fn dispatch_block_write(
         let block_num = offset / block_size;
 
         let block1 = encode_block1(block_num, more, szx);
-        let pkt_bytes = match build_block_put(&path.as_uri_path(), &token, mid, chunk, content_format, &block1) {
+        let pkt_bytes = match build_block_put(
+            &path.as_uri_path(),
+            &token,
+            mid,
+            chunk,
+            content_format,
+            &block1,
+        ) {
             Ok(b) => b,
             Err(e) => {
-                warn!(op_id, "Block write: failed to encode block {block_num}: {e}");
+                warn!(
+                    op_id,
+                    "Block write: failed to encode block {block_num}: {e}"
+                );
                 let _ = response_tx.send(Err(LwM2mError::BadRequest));
                 return;
             }
         };
         mid = mid.wrapping_add(1);
-        if mid == 0 { mid = 1; }
+        if mid == 0 {
+            mid = 1;
+        }
 
         // Retransmit loop for this block.
         let mut timeout_ms = ACK_TIMEOUT_MS;
@@ -227,7 +259,10 @@ async fn dispatch_block_write(
                 Ok(Ok(pkt)) => break pkt,
                 Ok(Err(_)) => {
                     // Sender was dropped by RST handler.
-                    let _ = response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
+                    let _ = response_tx.send(Err(LwM2mError::CoapError {
+                        class: 5,
+                        detail: 0,
+                    }));
                     return;
                 }
                 Err(_) => {
@@ -253,7 +288,10 @@ async fn dispatch_block_write(
             MessageClass::Response(Status::Continue) => {
                 if !more {
                     // Last block shouldn't elicit Continue — device error.
-                    let _ = response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
+                    let _ = response_tx.send(Err(LwM2mError::CoapError {
+                        class: 5,
+                        detail: 0,
+                    }));
                     return;
                 }
                 // Honor device's SZX negotiation (RFC 7959 §2.5).
@@ -280,7 +318,10 @@ async fn dispatch_block_write(
                 return;
             }
             _ => {
-                let _ = response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
+                let _ = response_tx.send(Err(LwM2mError::CoapError {
+                    class: 5,
+                    detail: 0,
+                }));
                 return;
             }
         }
@@ -298,7 +339,11 @@ fn build_request(command: &LwM2mCommand, token: [u8; 8], mid: u16) -> Result<Pac
             packet.header.code = MessageClass::Request(Method::Get);
             add_uri_path(&mut packet, &path.as_uri_path());
         }
-        LwM2mCommand::Write { path, value, content_format } => {
+        LwM2mCommand::Write {
+            path,
+            value,
+            content_format,
+        } => {
             packet.header.code = MessageClass::Request(Method::Put);
             add_uri_path(&mut packet, &path.as_uri_path());
             packet.add_option(
@@ -366,8 +411,13 @@ fn build_block_put(
     packet.header.message_id = mid;
     packet.set_token(token.to_vec());
     add_uri_path(&mut packet, uri_path);
-    packet.add_option(CoapOption::ContentFormat, content_format.to_be_bytes().to_vec());
+    packet.add_option(
+        CoapOption::ContentFormat,
+        content_format.to_be_bytes().to_vec(),
+    );
     packet.add_option(CoapOption::Block1, block1.to_vec());
     packet.payload = chunk.to_vec();
-    packet.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
+    packet
+        .to_bytes()
+        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
 }

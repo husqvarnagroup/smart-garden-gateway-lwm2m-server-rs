@@ -21,7 +21,10 @@ pub struct ResourcePath {
 impl ResourcePath {
     /// e.g. "3/0/0"
     pub fn as_uri_path(&self) -> String {
-        format!("{}/{}/{}", self.object_id, self.instance_id, self.resource_id)
+        format!(
+            "{}/{}/{}",
+            self.object_id, self.instance_id, self.resource_id
+        )
     }
 }
 
@@ -30,9 +33,18 @@ impl ResourcePath {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum LwM2mCommand {
-    Read { path: ResourcePath },
-    Write { path: ResourcePath, value: Vec<u8>, content_format: u16 },
-    Execute { path: ResourcePath, args: Option<Vec<u8>> },
+    Read {
+        path: ResourcePath,
+    },
+    Write {
+        path: ResourcePath,
+        value: Vec<u8>,
+        content_format: u16,
+    },
+    Execute {
+        path: ResourcePath,
+        args: Option<Vec<u8>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,7 +61,10 @@ pub enum LwM2mError {
     BadRequest,
     Timeout,
     /// CoAP error class/detail code pair (e.g. 4/4 = Not Found).
-    CoapError { class: u8, detail: u8 },
+    CoapError {
+        class: u8,
+        detail: u8,
+    },
 }
 
 pub type LwM2mResult = Result<ResourceValue, LwM2mError>;
@@ -140,4 +155,3 @@ impl Device {
         self.last_registered_at.elapsed().as_secs() > total
     }
 }
-

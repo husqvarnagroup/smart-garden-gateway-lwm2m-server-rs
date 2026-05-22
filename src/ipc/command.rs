@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    lwm2m::{bootstrap::BootstrapRegistry, ipso::SharedIpso, server::DispatchRequest},
     error::Result,
+    lwm2m::{bootstrap::BootstrapRegistry, ipso::SharedIpso, server::DispatchRequest},
     model::{LwM2mCommand, PendingOperation, ResourcePath, ResourceValue},
     registry::DeviceRegistry,
 };
@@ -43,7 +43,12 @@ pub async fn run(
     let listener = UnixListener::bind(&path)?;
     info!(path = %path.display(), "IPC command socket listening");
 
-    let ctx = IpcCtx { bootstrap_registry, registry, ipso, dispatch_tx };
+    let ctx = IpcCtx {
+        bootstrap_registry,
+        registry,
+        ipso,
+        dispatch_tx,
+    };
 
     loop {
         tokio::select! {
@@ -105,14 +110,22 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
                 let included = ctx.bootstrap_registry.included_list().await;
                 let mut payload = serde_json::Map::new();
                 for ep in &included {
-                    let (mut state, online) = ctx.registry.device_state_by_endpoint(ep).await
-                        .unwrap_or_else(|| (serde_json::Value::Object(serde_json::Map::new()), None));
+                    let (mut state, online) = ctx
+                        .registry
+                        .device_state_by_endpoint(ep)
+                        .await
+                        .unwrap_or_else(|| {
+                            (serde_json::Value::Object(serde_json::Map::new()), None)
+                        });
                     if let (Some(obj), Some(online)) = (state.as_object_mut(), online) {
                         let ts = crate::ipc::event::unix_ts();
-                        obj.insert("connection_status".into(), serde_json::json!({
-                            "_urn": "urn:oma:lwm2m:x:28171",
-                            "0": {"online": {"vb": online, "ts": ts}}
-                        }));
+                        obj.insert(
+                            "connection_status".into(),
+                            serde_json::json!({
+                                "_urn": "urn:oma:lwm2m:x:28171",
+                                "0": {"online": {"vb": online, "ts": ts}}
+                            }),
+                        );
                     }
                     payload.insert(ep.clone(), state);
                 }
@@ -125,9 +138,7 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
             }
         },
 
-        "execute"
-            if path.starts_with("includable_device/") && path.ends_with("/include") =>
-        {
+        "execute" if path.starts_with("includable_device/") && path.ends_with("/include") => {
             // path = "includable_device/<id>/include"
             let middle = &path["includable_device/".len()..path.len() - "/include".len()];
             match middle.parse::<u32>() {
@@ -174,7 +185,12 @@ struct ResolvedResource {
     res_id: u32,
 }
 
-async fn resolve_resource(path: &str, device: &str, op: &str, ctx: &IpcCtx) -> Option<ResolvedResource> {
+async fn resolve_resource(
+    path: &str,
+    device: &str,
+    op: &str,
+    ctx: &IpcCtx,
+) -> Option<ResolvedResource> {
     let parts: Vec<&str> = path.splitn(3, '/').collect();
     let (obj_name, inst_str, res_name) = match parts.as_slice() {
         [a, b, c] => (*a, *b, *c),
@@ -209,7 +225,13 @@ async fn resolve_resource(path: &str, device: &str, op: &str, ctx: &IpcCtx) -> O
         return None;
     };
 
-    Some(ResolvedResource { addr, dev_id, obj_id, inst_id, res_id })
+    Some(ResolvedResource {
+        addr,
+        dev_id,
+        obj_id,
+        inst_id,
+        res_id,
+    })
 }
 
 async fn dispatch_and_await(
@@ -229,8 +251,21 @@ async fn dispatch_and_await(
         attempts: 0,
     };
 
-    if ctx.dispatch_tx.send(DispatchRequest { addr: r.addr, ops: vec![op] }).await.is_err() {
-        warn!(device, path, activity = "control", "IPC {op_name}: dispatch channel closed");
+    if ctx
+        .dispatch_tx
+        .send(DispatchRequest {
+            addr: r.addr,
+            ops: vec![op],
+        })
+        .await
+        .is_err()
+    {
+        warn!(
+            device,
+            path,
+            activity = "control",
+            "IPC {op_name}: dispatch channel closed"
+        );
         return serde_json::json!({"success": false});
     }
 
@@ -239,8 +274,16 @@ async fn dispatch_and_await(
         Ok(Ok(Ok(ResourceValue::CoapResponse { class, detail }))) => {
             let code = (class as u16) * 32 + detail as u16;
             let name = coap_status_name(class, detail);
-            let verb = if op_name == "execute" { "Executed" } else { "Written" };
-            info!(device, activity = "control", "{verb} resource {path}, success: true");
+            let verb = if op_name == "execute" {
+                "Executed"
+            } else {
+                "Written"
+            };
+            info!(
+                device,
+                activity = "control",
+                "{verb} resource {path}, success: true"
+            );
             serde_json::json!({
                 "metadata": {
                     "lwm2m_client_id": dev_id,
@@ -252,11 +295,21 @@ async fn dispatch_and_await(
             })
         }
         Ok(Ok(Err(e))) => {
-            warn!(device, path, activity = "control", "IPC {op_name}: CoAP error {e:?}");
+            warn!(
+                device,
+                path,
+                activity = "control",
+                "IPC {op_name}: CoAP error {e:?}"
+            );
             serde_json::json!({"success": false})
         }
         Ok(Err(_)) => {
-            warn!(device, path, activity = "control", "IPC {op_name}: response channel dropped");
+            warn!(
+                device,
+                path,
+                activity = "control",
+                "IPC {op_name}: response channel dropped"
+            );
             serde_json::json!({"success": false})
         }
         Err(_) => {
@@ -267,7 +320,12 @@ async fn dispatch_and_await(
     }
 }
 
-async fn handle_execute_path(path: &str, device: &str, exec_payload: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Value {
+async fn handle_execute_path(
+    path: &str,
+    device: &str,
+    exec_payload: &serde_json::Value,
+    ctx: &IpcCtx,
+) -> serde_json::Value {
     let Some(r) = resolve_resource(path, device, "execute", ctx).await else {
         return serde_json::json!({"success": false});
     };
@@ -276,7 +334,10 @@ async fn handle_execute_path(path: &str, device: &str, exec_payload: &serde_json
         instance_id: r.inst_id,
         resource_id: r.res_id as u16,
     };
-    let command = LwM2mCommand::Execute { path: resource_path, args: execute_args(exec_payload) };
+    let command = LwM2mCommand::Execute {
+        path: resource_path,
+        args: execute_args(exec_payload),
+    };
     dispatch_and_await(command, &r, "execute", device, path, ctx).await
 }
 
@@ -286,12 +347,20 @@ fn execute_args(payload: &serde_json::Value) -> Option<Vec<u8>> {
         return None;
     }
     if arr.len() > 1 {
-        warn!("IPC execute: payload has {} args, using first only", arr.len());
+        warn!(
+            "IPC execute: payload has {} args, using first only",
+            arr.len()
+        );
     }
     arr[0].as_str().map(|s| s.as_bytes().to_vec())
 }
 
-async fn handle_write_path(path: &str, device: &str, write_payload: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Value {
+async fn handle_write_path(
+    path: &str,
+    device: &str,
+    write_payload: &serde_json::Value,
+    ctx: &IpcCtx,
+) -> serde_json::Value {
     let Some(r) = resolve_resource(path, device, "write", ctx).await else {
         return serde_json::json!({"success": false});
     };
@@ -304,7 +373,11 @@ async fn handle_write_path(path: &str, device: &str, write_payload: &serde_json:
         instance_id: r.inst_id,
         resource_id: r.res_id as u16,
     };
-    let command = LwM2mCommand::Write { path: resource_path, value, content_format };
+    let command = LwM2mCommand::Write {
+        path: resource_path,
+        value,
+        content_format,
+    };
     dispatch_and_await(command, &r, "write", device, path, ctx).await
 }
 

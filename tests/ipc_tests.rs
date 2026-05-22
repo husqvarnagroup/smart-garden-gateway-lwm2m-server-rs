@@ -11,7 +11,9 @@ async fn ipc_read_devices_returns_empty_payload() {
     let (reader, mut writer) = tokio::io::split(stream);
 
     writer
-        .write_all(b"[{\"op\":\"read\",\"entity\":{\"service\":\"lwm2mserver\",\"path\":\"devices\"}}]\n")
+        .write_all(
+            b"[{\"op\":\"read\",\"entity\":{\"service\":\"lwm2mserver\",\"path\":\"devices\"}}]\n",
+        )
         .await
         .unwrap();
 

@@ -12,16 +12,11 @@ use aes::{
     cipher::{BlockEncrypt, KeyInit},
     Aes128,
 };
-use p256::{
-    ecdh::diffie_hellman,
-    elliptic_curve::sec1::ToEncodedPoint,
-    PublicKey, SecretKey,
-};
+use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, PublicKey, SecretKey};
 use rand_core::OsRng;
-use tokio::sync::{oneshot, Mutex};
 use std::collections::HashSet;
+use tokio::sync::{oneshot, Mutex};
 use tracing::{info, warn};
-
 
 /// State for one in-progress bootstrap exchange with a device.
 pub struct BootstrapSession {
@@ -84,7 +79,11 @@ impl BootstrapRegistry {
         // Generate ephemeral P-256 keypair. The compressed public key is written
         // to /0/1/4 (Server Public Key) during bootstrap write phase.
         let secret = SecretKey::random(&mut OsRng);
-        let pubkey_bytes = secret.public_key().to_encoded_point(true).as_bytes().to_vec();
+        let pubkey_bytes = secret
+            .public_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec();
         info!(pubkey = %hex(&pubkey_bytes), "Bootstrap: generated ephemeral server P-256 keypair");
 
         Self {
@@ -147,7 +146,9 @@ impl BootstrapRegistry {
                 activity = "inclusion",
                 "Bootstrap read security object done"
             );
-            inner.cert_cache.insert(session.endpoint.clone(), payload.clone());
+            inner
+                .cert_cache
+                .insert(session.endpoint.clone(), payload.clone());
             session.pubkey_payload = Some(payload);
             Some(session)
         } else {
@@ -357,9 +358,9 @@ pub fn parse_device_pubkey(payload: &[u8]) -> crate::error::Result<Vec<u8>> {
             }
         }
         if name == Some("3") {
-            return vd
-                .map(|b| b.to_vec())
-                .ok_or_else(|| crate::error::Error::Bootstrap("resource 3 has no bytes value".into()));
+            return vd.map(|b| b.to_vec()).ok_or_else(|| {
+                crate::error::Error::Bootstrap("resource 3 has no bytes value".into())
+            });
         }
     }
     Err(crate::error::Error::Bootstrap(
@@ -398,23 +399,19 @@ pub fn encrypt_network_key(
 
     let device_pubkey = parse_p256_pubkey(device_pubkey_bytes)?;
 
-    let shared = diffie_hellman(
-        server_secret.to_nonzero_scalar(),
-        device_pubkey.as_affine(),
-    );
+    let shared = diffie_hellman(server_secret.to_nonzero_scalar(), device_pubkey.as_affine());
     let shared_x = shared.raw_secret_bytes(); // 32-byte X coordinate; use first 16 as AES-128 key
 
     // Build the 32-byte plaintext.
     let mut plaintext = [0u8; 32];
-    OsRng.fill_bytes(&mut plaintext[..14]);             // 14 random prefix bytes
+    OsRng.fill_bytes(&mut plaintext[..14]); // 14 random prefix bytes
     plaintext[14..30].copy_from_slice(&network_key[..16]);
     let crc = crc16_xmodem(&plaintext[..30]);
-    plaintext[30] = (crc >> 8) as u8;                  // big-endian CRC
+    plaintext[30] = (crc >> 8) as u8; // big-endian CRC
     plaintext[31] = crc as u8;
 
     // AES-128-ECB: encrypt each 16-byte block independently (no IV, no auth tag).
-    let cipher = Aes128::new_from_slice(&shared_x[..16])
-        .expect("16-byte AES-128 key");
+    let cipher = Aes128::new_from_slice(&shared_x[..16]).expect("16-byte AES-128 key");
     // GenericArray doesn't implement TryFrom<&[u8]>, so go through [u8; 16] first.
     let mut b0: aes::Block = (<[u8; 16]>::try_from(&plaintext[..16]).unwrap()).into();
     let mut b1: aes::Block = (<[u8; 16]>::try_from(&plaintext[16..]).unwrap()).into();
@@ -433,7 +430,11 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
     for &byte in data {
         crc ^= (byte as u16) << 8;
         for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
         }
     }
     crc
@@ -535,10 +536,14 @@ fn cert_check_key_usage(cert: &x509_cert::Certificate) -> crate::error::Result<(
 
     let mut iter = DerItemIter::new(ext_val);
     let Some((0x03, bs)) = iter.next() else {
-        return Err(crate::error::Error::Bootstrap("KeyUsage: expected BIT STRING".into()));
+        return Err(crate::error::Error::Bootstrap(
+            "KeyUsage: expected BIT STRING".into(),
+        ));
     };
     if bs.len() < 2 || bs[1] & 0x80 == 0 {
-        return Err(crate::error::Error::Bootstrap("digitalSignature not set".into()));
+        return Err(crate::error::Error::Bootstrap(
+            "digitalSignature not set".into(),
+        ));
     }
     Ok(())
 }
@@ -549,16 +554,21 @@ fn cert_check_eku(cert: &x509_cert::Certificate) -> crate::error::Result<()> {
     // id-kp-clientAuth  = 1.3.6.1.5.5.7.3.2 → OID content bytes (DER, no tag/len):
     const CLIENT_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02];
 
-    let ext_val = find_extension(cert, &[0x55, 0x1d, 0x25])
-        .ok_or_else(|| crate::error::Error::Bootstrap("missing ExtendedKeyUsage extension".into()))?;
+    let ext_val = find_extension(cert, &[0x55, 0x1d, 0x25]).ok_or_else(|| {
+        crate::error::Error::Bootstrap("missing ExtendedKeyUsage extension".into())
+    })?;
 
     let mut outer = DerItemIter::new(ext_val);
     let Some((0x30, seq)) = outer.next() else {
-        return Err(crate::error::Error::Bootstrap("EKU: expected SEQUENCE".into()));
+        return Err(crate::error::Error::Bootstrap(
+            "EKU: expected SEQUENCE".into(),
+        ));
     };
     let found = DerItemIter::new(seq).any(|(tag, val)| tag == 0x06 && val == CLIENT_AUTH);
     if !found {
-        return Err(crate::error::Error::Bootstrap("clientAuth not in ExtendedKeyUsage".into()));
+        return Err(crate::error::Error::Bootstrap(
+            "clientAuth not in ExtendedKeyUsage".into(),
+        ));
     }
     Ok(())
 }
@@ -630,22 +640,22 @@ fn cert_check_sgtin(cert: &x509_cert::Certificate) -> crate::error::Result<()> {
 
     let mut outer = DerItemIter::new(ext_val);
     let Some((0x30, seq)) = outer.next() else {
-        return Err(crate::error::Error::Bootstrap("SAN: expected SEQUENCE".into()));
+        return Err(crate::error::Error::Bootstrap(
+            "SAN: expected SEQUENCE".into(),
+        ));
     };
-    let found = DerItemIter::new(seq)
-        .any(|(tag, val)| tag == 0x86 && val.starts_with(b"sgtin:"));
+    let found = DerItemIter::new(seq).any(|(tag, val)| tag == 0x86 && val.starts_with(b"sgtin:"));
     if !found {
-        return Err(crate::error::Error::Bootstrap("no sgtin: URI in SubjectAltName".into()));
+        return Err(crate::error::Error::Bootstrap(
+            "no sgtin: URI in SubjectAltName".into(),
+        ));
     }
     Ok(())
 }
 
 /// Return the raw value bytes (OctetString content) of the first extension whose
 /// OID matches the given encoded OID bytes (DER content, without tag and length).
-fn find_extension<'a>(
-    cert: &'a x509_cert::Certificate,
-    oid_content: &[u8],
-) -> Option<&'a [u8]> {
+fn find_extension<'a>(cert: &'a x509_cert::Certificate, oid_content: &[u8]) -> Option<&'a [u8]> {
     let exts = cert.tbs_certificate.extensions.as_deref()?;
     exts.iter().find_map(|e| {
         // e.extn_id is an ObjectIdentifier; its DER encoding is 06 <len> <oid_content>.
@@ -822,7 +832,11 @@ pub fn encode_server_object() -> Vec<u8> {
 ///   {n:"5",  vd: network_key},
 /// ]
 /// ```
-pub fn encode_security_object(server_uri: &str, server_pubkey: &[u8], network_key: &[u8]) -> Vec<u8> {
+pub fn encode_security_object(
+    server_uri: &str,
+    server_pubkey: &[u8],
+    network_key: &[u8],
+) -> Vec<u8> {
     let mut out = cbor_array_header(6);
 
     // {bn: "/0/1/", n: "0", vs: server_uri}  — LWM2M Server URI
@@ -957,8 +971,7 @@ mod tests {
 
         // Device side: derive the same shared secret using the device private key.
         let scalar_bytes: [u8; 32] = from_hex(priv_scalar_hex).try_into().unwrap();
-        let device_secret =
-            SecretKey::from_bytes(&scalar_bytes.into()).unwrap();
+        let device_secret = SecretKey::from_bytes(&scalar_bytes.into()).unwrap();
         let shared = diffie_hellman(device_secret.to_nonzero_scalar(), server_pubkey.as_affine());
         let aes_key = &shared.raw_secret_bytes()[..16];
 
@@ -1019,8 +1032,8 @@ mod tests {
     fn validate_rejects_unknown_issuer() {
         let mut cert_der = from_hex(DK_CERT_DER_HEX);
         cert_der[57] ^= 0xff; // turn 's' into something else
-        let err = validate_device_certificate(&cert_der)
-            .expect_err("tampered issuer should be rejected");
+        let err =
+            validate_device_certificate(&cert_der).expect_err("tampered issuer should be rejected");
         assert!(
             err.to_string().contains("issuer"),
             "expected unknown-issuer error, got: {err}"

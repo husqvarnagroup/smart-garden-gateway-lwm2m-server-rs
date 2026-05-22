@@ -1,13 +1,21 @@
-use std::{net::SocketAddr, path::PathBuf, sync::{Arc, RwLock}, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use tempfile::TempDir;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
 use lwm2mserver_rs::{
-    lwm2m::{self, bootstrap::BootstrapRegistry, ipso::IpsoModel, server::DispatchRequest},
-    ipc::{command, event::{self, EventSender}},
     housekeeping,
+    ipc::{
+        command,
+        event::{self, EventSender},
+    },
+    lwm2m::{self, bootstrap::BootstrapRegistry, ipso::IpsoModel, server::DispatchRequest},
     persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
@@ -41,10 +49,7 @@ impl TestGateway {
         let coap_addr = socket.local_addr().expect("local addr");
 
         let registry = DeviceRegistry::new();
-        let bootstrap_registry = BootstrapRegistry::new(
-            vec![0u8; 16],
-            Some("coap://[::1]".into()),
-        );
+        let bootstrap_registry = BootstrapRegistry::new(vec![0u8; 16], Some("coap://[::1]".into()));
         let event_sender = EventSender::new();
         let (dispatch_tx, dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
         let dispatch_tx_ipc = dispatch_tx.clone();
@@ -91,12 +96,25 @@ impl TestGateway {
             dispatch_tx_ipc,
             cancel.clone(),
         ));
-        tokio::spawn(event::run(event_path.clone(), event_sender.clone(), cancel.clone()));
+        tokio::spawn(event::run(
+            event_path.clone(),
+            event_sender.clone(),
+            cancel.clone(),
+        ));
 
         // Yield to let tasks reach their accept/recv loops.
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        Self { coap_addr, ipc_path, event_path, cancel, registry, bootstrap_registry, event_sender, _tmp: tmp }
+        Self {
+            coap_addr,
+            ipc_path,
+            event_path,
+            cancel,
+            registry,
+            bootstrap_registry,
+            event_sender,
+            _tmp: tmp,
+        }
     }
 
     pub async fn stop(self) {

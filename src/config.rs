@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use clap::Parser;
 
@@ -24,7 +24,10 @@ struct Cli {
     port: u16,
 
     /// JSON file containing the network key (hex field "network_key")
-    #[arg(long, default_value = "/var/lib/lemonbeatd/Network_management/Network_key.json")]
+    #[arg(
+        long,
+        default_value = "/var/lib/lemonbeatd/Network_management/Network_key.json"
+    )]
     lb_key_file: PathBuf,
 
     /// Directories containing IPSO object definition XML files
@@ -53,8 +56,7 @@ impl Config {
     pub fn from_args() -> Result<Self> {
         let cli = Cli::parse();
 
-        let coap_bind_addr =
-            SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, cli.port));
+        let coap_bind_addr = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, cli.port));
         let coap_interface = cli.bind_to_device.then_some(cli.interface);
         let network_key = load_network_key(&cli.lb_key_file)?;
 
@@ -72,9 +74,9 @@ fn load_network_key(path: &PathBuf) -> Result<Vec<u8>> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display())))?;
     let json: serde_json::Value = serde_json::from_str(&content)?;
-    let hex_str = json["network_key"]
-        .as_str()
-        .ok_or_else(|| Error::Config("\"network_key\" missing or not a string in key file".into()))?;
+    let hex_str = json["network_key"].as_str().ok_or_else(|| {
+        Error::Config("\"network_key\" missing or not a string in key file".into())
+    })?;
     decode_hex(hex_str).map_err(|e| Error::Config(format!("invalid hex in network_key: {e}")))
 }
 

@@ -104,8 +104,14 @@ impl PersistenceStore {
 
         let mut snapshots = Vec::new();
         for client in clients {
-            let Some(ep_full) = client["ep"].as_str() else { continue };
-            let endpoint = ep_full.rfind(':').map(|i| &ep_full[i + 1..]).unwrap_or(ep_full).to_owned();
+            let Some(ep_full) = client["ep"].as_str() else {
+                continue;
+            };
+            let endpoint = ep_full
+                .rfind(':')
+                .map(|i| &ep_full[i + 1..])
+                .unwrap_or(ep_full)
+                .to_owned();
             let lwm2m_version = client["lwm2m"].as_str().unwrap_or("1.1").to_owned();
             let binding_mode = client["b"].as_str().unwrap_or("").to_owned();
             let end_of_life = client["end_of_life"].as_u64().unwrap_or(0);
@@ -135,11 +141,15 @@ impl PersistenceStore {
             let addr = if let Some(arr) = client["session"]["id"].as_array() {
                 let ip_str = arr.first().and_then(|v| v.as_str()).unwrap_or("::1");
                 let port = arr.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-                let ip: std::net::Ipv6Addr = ip_str.parse().unwrap_or(std::net::Ipv6Addr::LOCALHOST);
+                let ip: std::net::Ipv6Addr =
+                    ip_str.parse().unwrap_or(std::net::Ipv6Addr::LOCALHOST);
                 std::net::SocketAddr::V6(std::net::SocketAddrV6::new(ip, port, 0, 0))
             } else {
                 std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
-                    std::net::Ipv6Addr::LOCALHOST, 0, 0, 0,
+                    std::net::Ipv6Addr::LOCALHOST,
+                    0,
+                    0,
+                    0,
                 ))
             };
 
@@ -230,8 +240,12 @@ impl PersistenceStore {
                 Err(_) => continue,
             };
             match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(v) => { states.insert(stem, v); }
-                Err(e) => warn!(path = %path.display(), "Persistence: load device state failed: {e}"),
+                Ok(v) => {
+                    states.insert(stem, v);
+                }
+                Err(e) => {
+                    warn!(path = %path.display(), "Persistence: load device state failed: {e}")
+                }
             }
         }
         states
@@ -270,7 +284,12 @@ mod tests {
     }
 
     fn ipv6_addr(ip: &str, port: u16) -> SocketAddr {
-        SocketAddr::V6(SocketAddrV6::new(ip.parse::<Ipv6Addr>().unwrap(), port, 0, 0))
+        SocketAddr::V6(SocketAddrV6::new(
+            ip.parse::<Ipv6Addr>().unwrap(),
+            port,
+            0,
+            0,
+        ))
     }
 
     #[test]
@@ -307,7 +326,9 @@ mod tests {
         assert_eq!(s.object_versions, obj_versions);
         // Remaining lifetime shrinks by at most a few seconds during the test.
         assert!(s.lifetime <= 86400 && s.lifetime >= 86395);
-        let SocketAddr::V6(a) = s.addr else { panic!("expected V6 addr") };
+        let SocketAddr::V6(a) = s.addr else {
+            panic!("expected V6 addr")
+        };
         assert_eq!(a.port(), 20192);
         assert_eq!(a.ip().to_string(), "fc00::6:94bb:aec0:1f6");
     }

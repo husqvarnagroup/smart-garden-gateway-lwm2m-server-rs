@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path, sync::{Arc, RwLock}};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, RwLock},
+};
 use tracing::{info, warn};
 
 /// A shared, hot-reloadable IPSO model. Inner `Arc<IpsoModel>` is swapped
@@ -112,7 +116,12 @@ impl IpsoModel {
 
     /// Find the numeric resource ID for a resource name within a given object,
     /// using the version resolution order of `get_versioned`.
-    pub fn resource_id_by_name(&self, object_id: u32, resource_name: &str, version: Option<&str>) -> Option<u32> {
+    pub fn resource_id_by_name(
+        &self,
+        object_id: u32,
+        resource_name: &str,
+        version: Option<&str>,
+    ) -> Option<u32> {
         let def = self.get_versioned(object_id, version)?;
         def.resources
             .iter()
@@ -241,7 +250,15 @@ fn parse_xml_str(xml: &str) -> Option<(u32, String, ObjectDef)> {
     let urn = object_urn.unwrap_or_default();
     let version = object_version.unwrap_or_default();
 
-    Some((id, version, ObjectDef { name, urn, resources }))
+    Some((
+        id,
+        version,
+        ObjectDef {
+            name,
+            urn,
+            resources,
+        },
+    ))
 }
 
 fn parse_resource_type(s: &str) -> ResourceType {
@@ -381,14 +398,23 @@ mod tests {
         // CamelCase object names
         assert_eq!(to_snake_case("IrrigationControl"), "irrigation_control");
         assert_eq!(to_snake_case("Device"), "device");
-        assert_eq!(to_snake_case("ConnectivityMonitoring"), "connectivity_monitoring");
+        assert_eq!(
+            to_snake_case("ConnectivityMonitoring"),
+            "connectivity_monitoring"
+        );
         assert_eq!(to_snake_case("SgCommon"), "sg_common");
         assert_eq!(to_snake_case("MasterChannel"), "master_channel");
         // Title-case resource names (spaces → underscores)
         assert_eq!(to_snake_case("Model Number"), "model_number");
         assert_eq!(to_snake_case("Serial Number"), "serial_number");
-        assert_eq!(to_snake_case("Available Power Sources"), "available_power_sources");
-        assert_eq!(to_snake_case("Supported Binding and Modes"), "supported_binding_and_modes");
+        assert_eq!(
+            to_snake_case("Available Power Sources"),
+            "available_power_sources"
+        );
+        assert_eq!(
+            to_snake_case("Supported Binding and Modes"),
+            "supported_binding_and_modes"
+        );
         // Acronyms: no underscore between consecutive uppercase letters
         assert_eq!(to_snake_case("UTC Offset"), "utc_offset");
         assert_eq!(to_snake_case("SMNC"), "smnc");

@@ -8,7 +8,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 async fn event_socket_accepts_connection() {
     let gw = common::TestGateway::start().await;
 
-    let stream = tokio::net::UnixStream::connect(&gw.event_path).await.unwrap();
+    let stream = tokio::net::UnixStream::connect(&gw.event_path)
+        .await
+        .unwrap();
     let (reader, _writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
 
@@ -29,7 +31,10 @@ async fn ipc_execute_include_triggers_event() {
     let gw = common::TestGateway::start().await;
 
     // Register a fake device endpoint so it gets a numeric IPC id.
-    let id = gw.bootstrap_registry.ensure_includable_id("test-device").await;
+    let id = gw
+        .bootstrap_registry
+        .ensure_includable_id("test-device")
+        .await;
 
     let cmd_stream = tokio::net::UnixStream::connect(&gw.ipc_path).await.unwrap();
     let (cmd_reader, mut cmd_writer) = tokio::io::split(cmd_stream);

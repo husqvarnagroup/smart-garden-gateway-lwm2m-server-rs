@@ -3,16 +3,23 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use tracing_subscriber::{Layer as _, util::SubscriberInitExt as _, prelude::__tracing_subscriber_SubscriberExt as _};
+use tracing_subscriber::{
+    prelude::__tracing_subscriber_SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
+};
 
 use std::sync::Arc;
 
 use lwm2mserver_rs::{
-    lwm2m::{self, bootstrap::BootstrapRegistry, ipso::{IpsoModel, load_shared}, server::DispatchRequest},
     config::Config,
     housekeeping,
     ipc::{command, event},
     logging::{PrefixedFields, SyslogLayer},
+    lwm2m::{
+        self,
+        bootstrap::BootstrapRegistry,
+        ipso::{load_shared, IpsoModel},
+        server::DispatchRequest,
+    },
     persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
@@ -23,7 +30,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "lwm2mserver_rs=info".into());
 
     let journal = std::env::var_os("JOURNAL_STREAM").is_some();
-    let syslog = if journal { SyslogLayer::try_new() } else { None };
+    let syslog = if journal {
+        SyslogLayer::try_new()
+    } else {
+        None
+    };
     let suppress_fmt = journal && syslog.is_some();
     let fmt = tracing_subscriber::fmt::layer()
         .event_format(PrefixedFields::default())
@@ -42,7 +53,8 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_args().map_err(|e| anyhow::anyhow!("{e}"))?;
     let ipso = load_shared(&cfg.ipso_directories);
     let registry = DeviceRegistry::new();
-    let bootstrap_registry = BootstrapRegistry::new(cfg.network_key.clone(), Some(cfg.server_uri.clone()));
+    let bootstrap_registry =
+        BootstrapRegistry::new(cfg.network_key.clone(), Some(cfg.server_uri.clone()));
     let bootstrap_registry_hk = bootstrap_registry.clone();
     let bootstrap_registry_ipc = bootstrap_registry.clone();
     let event_sender = event::EventSender::new();

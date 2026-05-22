@@ -8,8 +8,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    lwm2m::{bootstrap::BootstrapRegistry, ipso::{IpsoModel, SharedIpso}, server::DispatchRequest},
     error::Result,
+    lwm2m::{
+        bootstrap::BootstrapRegistry,
+        ipso::{IpsoModel, SharedIpso},
+        server::DispatchRequest,
+    },
     model::{LwM2mCommand, PendingOperation, ResourcePath},
     registry::DeviceRegistry,
 };

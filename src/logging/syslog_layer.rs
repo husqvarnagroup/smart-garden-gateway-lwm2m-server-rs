@@ -1,4 +1,8 @@
-use std::{fmt::Write as _, os::unix::net::UnixDatagram, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fmt::Write as _,
+    os::unix::net::UnixDatagram,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tracing::{Event, Subscriber};
 use tracing_subscriber::{layer::Context, Layer};
@@ -23,7 +27,11 @@ impl SyslogLayer {
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let hostname = if hostname.is_empty() { "-".to_owned() } else { hostname };
+        let hostname = if hostname.is_empty() {
+            "-".to_owned()
+        } else {
+            hostname
+        };
 
         Some(Self {
             socket,
@@ -60,8 +68,8 @@ impl<S: Subscriber> Layer<S> for SyslogLayer {
 fn level_to_severity(level: tracing::Level) -> u8 {
     match level {
         tracing::Level::ERROR => 3,
-        tracing::Level::WARN  => 4,
-        tracing::Level::INFO  => 6,
+        tracing::Level::WARN => 4,
+        tracing::Level::INFO => 6,
         tracing::Level::DEBUG | tracing::Level::TRACE => 7,
     }
 }
@@ -83,9 +91,9 @@ fn escape_sd(v: &str) -> String {
     for c in v.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
-            '"'  => out.push_str("\\\""),
-            ']'  => out.push_str("\\]"),
-            c    => out.push(c),
+            '"' => out.push_str("\\\""),
+            ']' => out.push_str("\\]"),
+            c => out.push(c),
         }
     }
     out
@@ -94,25 +102,27 @@ fn escape_sd(v: &str) -> String {
 /// Format current UTC time as RFC 3339 with millisecond precision.
 /// Uses only std — no chrono dep needed.
 fn format_timestamp() -> String {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = d.as_secs();
     let millis = d.subsec_millis();
 
-    let sec  = secs % 60;
-    let min  = (secs / 60) % 60;
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
     let hour = (secs / 3600) % 24;
     let days = secs / 86400;
 
     // Civil-date algorithm: http://howardhinnant.github.io/date_algorithms.html
-    let z   = days as i64 + 719_468;
+    let z = days as i64 + 719_468;
     let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp  = (5 * doy + 2) / 153;
+    let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
     let mon = if mp < 10 { mp + 3 } else { mp - 9 };
-    let yr  = yoe as i64 + era * 400 + if mon <= 2 { 1 } else { 0 };
+    let yr = yoe as i64 + era * 400 + if mon <= 2 { 1 } else { 0 };
 
     format!("{yr:04}-{mon:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z")
 }

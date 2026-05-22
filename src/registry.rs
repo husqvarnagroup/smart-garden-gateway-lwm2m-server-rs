@@ -93,7 +93,16 @@ impl DeviceRegistry {
         let id = inner.next_id;
         inner.next_id = inner.next_id.wrapping_add(1).max(1);
 
-        let dev = Device::new(id, endpoint.clone(), addr, lifetime, objects, object_versions, lwm2m_version, binding_mode);
+        let dev = Device::new(
+            id,
+            endpoint.clone(),
+            addr,
+            lifetime,
+            objects,
+            object_versions,
+            lwm2m_version,
+            binding_mode,
+        );
         inner.by_id.insert(id, dev);
         inner.by_endpoint.insert(endpoint.clone(), id);
         inner.by_addr.insert(addr, id);
@@ -165,14 +174,18 @@ impl DeviceRegistry {
             let needs_ping = match dev.online {
                 Some(true) => {
                     dev.last_contact.elapsed() >= online_interval
-                        && dev.last_ping_attempt.is_none_or(|t| t.elapsed() >= online_interval)
+                        && dev
+                            .last_ping_attempt
+                            .is_none_or(|t| t.elapsed() >= online_interval)
                 }
                 Some(false) => {
                     let within_window = dev
                         .offline_since
                         .is_some_and(|t| t.elapsed() < offline_max_duration);
                     within_window
-                        && dev.last_ping_attempt.is_none_or(|t| t.elapsed() >= offline_interval)
+                        && dev
+                            .last_ping_attempt
+                            .is_none_or(|t| t.elapsed() >= offline_interval)
                 }
                 None => false,
             };
@@ -210,13 +223,19 @@ impl DeviceRegistry {
     /// Return true if an in-flight operation with this token is still pending (non-destructive).
     pub async fn is_in_flight(&self, addr: SocketAddr, token: &[u8; 8]) -> bool {
         let inner = self.inner.read().await;
-        let Some(id) = inner.by_addr.get(&addr) else { return false; };
+        let Some(id) = inner.by_addr.get(&addr) else {
+            return false;
+        };
         inner.by_id[id].in_flight.contains_key(token)
     }
 
     /// Remove an in-flight operation by token (CoAP response received).
     /// Returns the op so the caller can fire its response channel.
-    pub async fn complete_in_flight(&self, addr: SocketAddr, token: &[u8; 8]) -> Option<PendingOperation> {
+    pub async fn complete_in_flight(
+        &self,
+        addr: SocketAddr,
+        token: &[u8; 8],
+    ) -> Option<PendingOperation> {
         let mut inner = self.inner.write().await;
         let id = *inner.by_addr.get(&addr)?;
         inner.by_id.get_mut(&id)?.in_flight.remove(token)
@@ -260,7 +279,10 @@ impl DeviceRegistry {
     }
 
     /// Look up a device by endpoint name, returning its address, registry ID, and object versions.
-    pub async fn addr_and_id_by_endpoint(&self, endpoint: &str) -> Option<(SocketAddr, DeviceId, HashMap<u32, String>)> {
+    pub async fn addr_and_id_by_endpoint(
+        &self,
+        endpoint: &str,
+    ) -> Option<(SocketAddr, DeviceId, HashMap<u32, String>)> {
         let inner = self.inner.read().await;
         let &id = inner.by_endpoint.get(endpoint)?;
         let dev = &inner.by_id[&id];
@@ -301,21 +323,25 @@ impl DeviceRegistry {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        inner.by_id.values().map(|dev| {
-            let elapsed = dev.last_registered_at.elapsed().as_secs();
-            let remaining = dev.lifetime.saturating_sub(elapsed as u32);
-            DeviceSnapshot {
-                id: dev.id,
-                endpoint: dev.endpoint.clone(),
-                addr: dev.addr,
-                lifetime: remaining,
-                objects: dev.objects.clone(),
-                object_versions: dev.object_versions.clone(),
-                lwm2m_version: dev.lwm2m_version.clone(),
-                binding_mode: dev.binding_mode.clone(),
-                end_of_life: now_unix + remaining as u64,
-            }
-        }).collect()
+        inner
+            .by_id
+            .values()
+            .map(|dev| {
+                let elapsed = dev.last_registered_at.elapsed().as_secs();
+                let remaining = dev.lifetime.saturating_sub(elapsed as u32);
+                DeviceSnapshot {
+                    id: dev.id,
+                    endpoint: dev.endpoint.clone(),
+                    addr: dev.addr,
+                    lifetime: remaining,
+                    objects: dev.objects.clone(),
+                    object_versions: dev.object_versions.clone(),
+                    lwm2m_version: dev.lwm2m_version.clone(),
+                    binding_mode: dev.binding_mode.clone(),
+                    end_of_life: now_unix + remaining as u64,
+                }
+            })
+            .collect()
     }
 
     /// Restore devices from persisted snapshots.
@@ -359,7 +385,9 @@ impl DeviceRegistry {
         new_state: serde_json::Value,
     ) -> serde_json::Value {
         let mut inner = self.inner.write().await;
-        let Some(&id) = inner.by_addr.get(&addr) else { return new_state; };
+        let Some(&id) = inner.by_addr.get(&addr) else {
+            return new_state;
+        };
         let dev = inner.by_id.get_mut(&id).unwrap();
         json_merge(&mut dev.state, new_state);
         dev.state.clone()
@@ -383,7 +411,10 @@ impl DeviceRegistry {
     }
 
     /// Return the accumulated IPSO state and online status for a device identified by endpoint name.
-    pub async fn device_state_by_endpoint(&self, endpoint: &str) -> Option<(serde_json::Value, Option<bool>)> {
+    pub async fn device_state_by_endpoint(
+        &self,
+        endpoint: &str,
+    ) -> Option<(serde_json::Value, Option<bool>)> {
         let inner = self.inner.read().await;
         let &id = inner.by_endpoint.get(endpoint)?;
         let dev = &inner.by_id[&id];
@@ -393,7 +424,9 @@ impl DeviceRegistry {
     /// Restore persisted IPSO state for a device identified by endpoint name.
     pub async fn restore_device_state(&self, endpoint: &str, state: serde_json::Value) {
         let mut inner = self.inner.write().await;
-        let Some(&id) = inner.by_endpoint.get(endpoint) else { return; };
+        let Some(&id) = inner.by_endpoint.get(endpoint) else {
+            return;
+        };
         if let Some(dev) = inner.by_id.get_mut(&id) {
             dev.state = state;
         }

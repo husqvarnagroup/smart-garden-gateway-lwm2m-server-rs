@@ -10,17 +10,20 @@ use std::{
 use coap_lite::{
     CoapOption, MessageClass, MessageType, Packet, RequestType as Method, ResponseType as Status,
 };
-use tokio::{net::UdpSocket, sync::{mpsc, oneshot}};
+use tokio::{
+    net::UdpSocket,
+    sync::{mpsc, oneshot},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
+    error::Result,
+    ipc::event::EventSender,
     lwm2m::{
         bootstrap::{self, BootstrapRegistry},
         ipso::{IpsoModel, SharedIpso},
     },
-    error::Result,
-    ipc::event::EventSender,
     model::{LwM2mCommand, LwM2mError, PendingOperation, ResourcePath},
     persistence::PersistenceStore,
     registry::DeviceRegistry,
@@ -103,8 +106,8 @@ struct ServerCtx<'a> {
 }
 
 async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
-    let packet = Packet::from_bytes(data)
-        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
+    let packet =
+        Packet::from_bytes(data).map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
 
     if let Some(endpoint) = ctx.registry.touch(addr).await {
         info!(device = %endpoint, activity = "connection-status", "Device is online");
@@ -113,35 +116,47 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
 
     match packet.header.get_type() {
         // Device initiating a request to the server (registration, update).
-        MessageType::Confirmable | MessageType::NonConfirmable => {
-            match packet.header.code {
-                MessageClass::Request(Method::Post) => {
-                    handle_post(packet, addr, ctx).await?;
-                }
-                MessageClass::Request(Method::Delete) => {
-                    handle_delete(packet, addr, ctx).await?;
-                }
-                other => {
-                    warn!(%addr, ?other, "Unexpected CoAP request method");
-                }
+        MessageType::Confirmable | MessageType::NonConfirmable => match packet.header.code {
+            MessageClass::Request(Method::Post) => {
+                handle_post(packet, addr, ctx).await?;
             }
-        }
+            MessageClass::Request(Method::Delete) => {
+                handle_delete(packet, addr, ctx).await?;
+            }
+            other => {
+                warn!(%addr, ?other, "Unexpected CoAP request method");
+            }
+        },
         // Device acknowledging one of our downlink requests.
         MessageType::Acknowledgement => {
-            handle_ack(packet, addr, ctx.registry, ctx.bootstrap_registry, ctx.block_acks).await?;
+            handle_ack(
+                packet,
+                addr,
+                ctx.registry,
+                ctx.bootstrap_registry,
+                ctx.block_acks,
+            )
+            .await?;
         }
         MessageType::Reset => {
             // Device rejected our message — treat as error for the in-flight op.
             let token = token_array(packet.get_token());
             if ctx.bootstrap_registry.is_pending(&token).await {
                 warn!(%addr, "Bootstrap GET /0/0 reset by device");
-            } else if ctx.bootstrap_registry.complete_write_ack(&token, false).await {
+            } else if ctx
+                .bootstrap_registry
+                .complete_write_ack(&token, false)
+                .await
+            {
                 warn!(%addr, "Bootstrap write op reset by device");
             } else {
                 // Drop the block-write sender (if any) — signals error to the block task.
                 ctx.block_acks.lock().await.remove(&token);
                 if let Some(op) = ctx.registry.complete_in_flight(addr, &token).await {
-                    let _ = op.response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
+                    let _ = op.response_tx.send(Err(LwM2mError::CoapError {
+                        class: 5,
+                        detail: 0,
+                    }));
                 }
             }
         }
@@ -156,11 +171,28 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
     match path_parts.as_slice() {
         // POST /bs?ep=<name>&pct=<fmt>  — bootstrap request
         [p] if *p == BS_PATH => {
-            handle_bootstrap(packet, addr, ctx.socket, ctx.bootstrap_registry, ctx.event_sender, ctx.persistence).await?;
+            handle_bootstrap(
+                packet,
+                addr,
+                ctx.socket,
+                ctx.bootstrap_registry,
+                ctx.event_sender,
+                ctx.persistence,
+            )
+            .await?;
         }
         // POST /rd?ep=<name>&lt=<lifetime>&b=U  — new registration
         [p] if *p == RD_PATH => {
-            handle_registration(packet, addr, ctx.socket, ctx.registry, ctx.bootstrap_registry, ctx.coap_dispatch_tx, ctx.persistence).await?;
+            handle_registration(
+                packet,
+                addr,
+                ctx.socket,
+                ctx.registry,
+                ctx.bootstrap_registry,
+                ctx.coap_dispatch_tx,
+                ctx.persistence,
+            )
+            .await?;
         }
         // POST /rd/<id>  — registration update (heartbeat)
         [p, _id] if *p == RD_PATH => {
@@ -169,7 +201,16 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
         // POST /dp  — device data push (SenML+CBOR state report after registration)
         [p] if *p == DP_PATH => {
             let ipso = ctx.ipso.read().unwrap().clone();
-            handle_dp(packet, addr, ctx.socket, ctx.registry, ctx.event_sender, &ipso, ctx.persistence).await?;
+            handle_dp(
+                packet,
+                addr,
+                ctx.socket,
+                ctx.registry,
+                ctx.event_sender,
+                &ipso,
+                ctx.persistence,
+            )
+            .await?;
         }
         _ => {
             warn!(%addr, path, "POST to unknown path");
@@ -255,7 +296,8 @@ async fn handle_bootstrap(
                     let included = br.included_list().await;
                     let ps2 = Arc::clone(&ps);
                     tokio::spawn(async move {
-                        let _ = tokio::task::spawn_blocking(move || ps2.save_included(&included)).await;
+                        let _ =
+                            tokio::task::spawn_blocking(move || ps2.save_included(&included)).await;
                     });
                     info!(device = %ep, activity = "inclusion", "Inclusion completed");
                 }
@@ -298,12 +340,18 @@ async fn handle_bootstrap(
     Ok(())
 }
 
-fn make_response_bytes(request: &Packet, status: Status, payload: Option<Vec<u8>>) -> Result<Vec<u8>> {
+fn make_response_bytes(
+    request: &Packet,
+    status: Status,
+    payload: Option<Vec<u8>>,
+) -> Result<Vec<u8>> {
     let mut response = make_response(request, status);
     if let Some(body) = payload {
         response.payload = body;
     }
-    response.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
+    response
+        .to_bytes()
+        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
 }
 
 /// Send a bootstrap-phase CoAP packet (TC=0x0c — no MAC-layer encryption).
@@ -349,7 +397,10 @@ async fn handle_registration(
         .get("lt")
         .and_then(|v| v.parse().ok())
         .unwrap_or(86400);
-    let lwm2m_version = params.get("lwm2m").cloned().unwrap_or_else(|| "1.0".to_owned());
+    let lwm2m_version = params
+        .get("lwm2m")
+        .cloned()
+        .unwrap_or_else(|| "1.0".to_owned());
     let binding_mode = params.get("b").cloned().unwrap_or_default();
 
     if endpoint.is_empty() {
@@ -362,7 +413,17 @@ async fn handle_registration(
     let body = std::str::from_utf8(packet.payload.as_slice()).unwrap_or("");
     let (objects, object_versions) = parse_link_format(body);
 
-    let id = registry.register(endpoint.clone(), addr, lifetime, objects, object_versions, lwm2m_version, binding_mode).await;
+    let id = registry
+        .register(
+            endpoint.clone(),
+            addr,
+            lifetime,
+            objects,
+            object_versions,
+            lwm2m_version,
+            binding_mode,
+        )
+        .await;
 
     // 2.01 Created with Location-Path: rd / <id>
     let mut response = make_response(&packet, Status::Created);
@@ -383,14 +444,23 @@ async fn handle_registration(
         let op = PendingOperation {
             id: INTERNAL_OP_ID.fetch_add(1, Ordering::Relaxed),
             command: LwM2mCommand::Execute {
-                path: ResourcePath { object_id: 3, instance_id: 0, resource_id: 5 },
+                path: ResourcePath {
+                    object_id: 3,
+                    instance_id: 0,
+                    resource_id: 5,
+                },
                 args: None,
             },
             response_tx,
             created_at: std::time::Instant::now(),
             attempts: 0,
         };
-        let _ = coap_dispatch_tx.send(DispatchRequest { addr, ops: vec![op] }).await;
+        let _ = coap_dispatch_tx
+            .send(DispatchRequest {
+                addr,
+                ops: vec![op],
+            })
+            .await;
 
         let registry = registry.clone();
         let ps = Arc::clone(persistence);
@@ -426,7 +496,9 @@ async fn handle_update(
 
     // Always reset the expiry timer; apply a new lifetime if lt= was included.
     let query = uri_query(&packet);
-    let new_lt = parse_query(&query).get("lt").and_then(|v| v.parse::<u32>().ok());
+    let new_lt = parse_query(&query)
+        .get("lt")
+        .and_then(|v| v.parse::<u32>().ok());
     registry.renew_registration(addr, new_lt).await;
 
     // Drain pending ops and hand them to the dispatch task.
@@ -454,7 +526,10 @@ async fn handle_ack(
 
     // Bootstrap GET /0/0 ACK — validate cert, cache on success; write phase triggered on next /bs.
     if bootstrap_registry.is_pending(&token).await {
-        if let Some(session) = bootstrap_registry.complete(&token, packet.payload.clone()).await {
+        if let Some(session) = bootstrap_registry
+            .complete(&token, packet.payload.clone())
+            .await
+        {
             let payload = session.pubkey_payload.as_deref().unwrap_or(&[]);
             let valid = bootstrap::parse_device_pubkey(payload)
                 .and_then(|cert_der| bootstrap::validate_device_certificate(&cert_der));
@@ -473,7 +548,9 @@ async fn handle_ack(
                         activity = "inclusion",
                         "Device certificate rejected: {e}"
                     );
-                    bootstrap_registry.remove_from_cert_cache(&session.endpoint).await;
+                    bootstrap_registry
+                        .remove_from_cert_cache(&session.endpoint)
+                        .await;
                 }
             }
         }
@@ -517,18 +594,25 @@ async fn handle_dp(
         return Ok(());
     };
 
-    let obj_versions = registry.object_versions_by_addr(addr).await.unwrap_or_default();
+    let obj_versions = registry
+        .object_versions_by_addr(addr)
+        .await
+        .unwrap_or_default();
 
     match build_device_payload(&packet.payload, ipso, &obj_versions) {
         Some(payload) => {
             if let Some(objs) = payload.as_object() {
-                let instances: Vec<String> = objs.iter()
+                let instances: Vec<String> = objs
+                    .iter()
                     .flat_map(|(obj, insts)| {
-                        insts.as_object()
-                            .map(|m| m.keys()
-                                .filter(|k| *k != "_urn")
-                                .map(|inst| format!("{obj}/{inst}"))
-                                .collect::<Vec<_>>())
+                        insts
+                            .as_object()
+                            .map(|m| {
+                                m.keys()
+                                    .filter(|k| *k != "_urn")
+                                    .map(|inst| format!("{obj}/{inst}"))
+                                    .collect::<Vec<_>>()
+                            })
                             .unwrap_or_default()
                     })
                     .collect();
@@ -536,10 +620,14 @@ async fn handle_dp(
                 for (obj, insts) in objs {
                     if let Some(inst_map) = insts.as_object() {
                         for (inst, resources) in inst_map {
-                            if inst == "_urn" { continue; }
+                            if inst == "_urn" {
+                                continue;
+                            }
                             if let Some(res_map) = resources.as_object() {
                                 for (res, val) in res_map {
-                                    if res == "_urn" { continue; }
+                                    if res == "_urn" {
+                                        continue;
+                                    }
                                     let formatted = format_resource_value(val);
                                     info!(device = %endpoint, activity = "state", "Reported resource {obj}/{inst}/{res} as {formatted}");
                                 }
@@ -548,15 +636,20 @@ async fn handle_dp(
                     }
                 }
             }
-            let state = registry.merge_device_state_by_addr(addr, payload.clone()).await;
+            let state = registry
+                .merge_device_state_by_addr(addr, payload.clone())
+                .await;
             event_sender.send_device_data(&endpoint, payload);
             let ps = Arc::clone(persistence);
             let ep = endpoint.clone();
             tokio::spawn(async move {
-                let _ = tokio::task::spawn_blocking(move || ps.save_device_state(&ep, &state)).await;
+                let _ =
+                    tokio::task::spawn_blocking(move || ps.save_device_state(&ep, &state)).await;
             });
         }
-        None => warn!(%addr, device = %endpoint, activity = "state", "No known objects in /dp payload"),
+        None => {
+            warn!(%addr, device = %endpoint, activity = "state", "No known objects in /dp payload")
+        }
     }
 
     Ok(())
@@ -618,29 +711,54 @@ fn build_device_payload(
             let Cbor::Integer(i) = key else { continue };
             match i128::from(*i) {
                 -2 => {
-                    if let Cbor::Text(s) = val { base_name = s.clone(); }
+                    if let Cbor::Text(s) = val {
+                        base_name = s.clone();
+                    }
                 }
                 0 => {
-                    if let Cbor::Text(s) = val { rel_name = s.clone(); }
+                    if let Cbor::Text(s) = val {
+                        rel_name = s.clone();
+                    }
                 }
                 2 => match val {
-                    Cbor::Integer(i) => { value = Some(SenmlValue::Int(i128::from(*i) as i64)); }
-                    Cbor::Float(f)   => { value = Some(SenmlValue::Float(*f)); }
+                    Cbor::Integer(i) => {
+                        value = Some(SenmlValue::Int(i128::from(*i) as i64));
+                    }
+                    Cbor::Float(f) => {
+                        value = Some(SenmlValue::Float(*f));
+                    }
                     _ => {}
                 },
-                3 => { if let Cbor::Text(s) = val { value = Some(SenmlValue::Str(s.clone())); } }
-                4 => { if let Cbor::Bool(b) = val { value = Some(SenmlValue::Bool(*b)); } }
-                8 => { if let Cbor::Bytes(b) = val { value = Some(SenmlValue::Bytes(b.clone())); } }
+                3 => {
+                    if let Cbor::Text(s) = val {
+                        value = Some(SenmlValue::Str(s.clone()));
+                    }
+                }
+                4 => {
+                    if let Cbor::Bool(b) = val {
+                        value = Some(SenmlValue::Bool(*b));
+                    }
+                }
+                8 => {
+                    if let Cbor::Bytes(b) = val {
+                        value = Some(SenmlValue::Bytes(b.clone()));
+                    }
+                }
                 _ => {}
             }
         }
 
         let full_path = format!("{base_name}{rel_name}");
         let Some(v) = value else { continue };
-        let Some((obj_id, inst_id, res_id, has_res_inst)) = parse_lwm2m_path(&full_path) else { continue };
+        let Some((obj_id, inst_id, res_id, has_res_inst)) = parse_lwm2m_path(&full_path) else {
+            continue;
+        };
 
-        let entry = raw.entry(obj_id).or_default()
-            .entry(inst_id).or_default()
+        let entry = raw
+            .entry(obj_id)
+            .or_default()
+            .entry(inst_id)
+            .or_default()
             .entry(res_id)
             .or_insert_with(|| (Vec::new(), false));
         entry.0.push(v);
@@ -651,10 +769,15 @@ fn build_device_payload(
 
     for (obj_id, instances) in &raw {
         let ver = obj_versions.get(obj_id).map(String::as_str);
-        let Some(obj_def) = ipso.get_versioned(*obj_id, ver) else { continue };
+        let Some(obj_def) = ipso.get_versioned(*obj_id, ver) else {
+            continue;
+        };
 
         let mut obj_json = serde_json::Map::new();
-        obj_json.insert("_urn".into(), serde_json::Value::String(obj_def.urn.clone()));
+        obj_json.insert(
+            "_urn".into(),
+            serde_json::Value::String(obj_def.urn.clone()),
+        );
 
         for (inst_id, resources) in instances {
             let mut inst_json = serde_json::Map::new();
@@ -662,7 +785,11 @@ fn build_device_payload(
             for (res_id, (values, path_is_array)) in resources {
                 let (res_name, res_type, def_is_array) = match obj_def.resources.get(res_id) {
                     Some(r) => (r.name.clone(), &r.resource_type, r.multiple_instances),
-                    None    => (res_id.to_string(), &crate::lwm2m::ipso::ResourceType::Integer, false),
+                    None => (
+                        res_id.to_string(),
+                        &crate::lwm2m::ipso::ResourceType::Integer,
+                        false,
+                    ),
                 };
 
                 // Use array encoding when the IPSO def or the SenML path signals multi-instance.
@@ -682,7 +809,11 @@ fn build_device_payload(
         payload.insert(obj_def.name.clone(), serde_json::Value::Object(obj_json));
     }
 
-    if payload.is_empty() { None } else { Some(serde_json::Value::Object(payload)) }
+    if payload.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(payload))
+    }
 }
 
 /// Parse `/<obj>/<inst>/<res>[/<res_inst>]`.
@@ -693,9 +824,9 @@ fn build_device_payload(
 fn parse_lwm2m_path(path: &str) -> Option<(u32, u32, u32, bool)> {
     let trimmed = path.trim_start_matches('/');
     let mut parts = trimmed.splitn(5, '/');
-    let obj:  u32 = parts.next()?.parse().ok()?;
+    let obj: u32 = parts.next()?.parse().ok()?;
     let inst: u32 = parts.next()?.parse().ok()?;
-    let res:  u32 = parts.next()?.parse().ok()?;
+    let res: u32 = parts.next()?.parse().ok()?;
     let has_res_inst = parts.next().is_some_and(|p| p.parse::<u32>().is_ok());
     Some((obj, inst, res, has_res_inst))
 }
@@ -705,15 +836,15 @@ fn encode_single_value(
     res_type: &crate::lwm2m::ipso::ResourceType,
     ts: u64,
 ) -> serde_json::Value {
-    use base64::{engine::general_purpose::STANDARD, Engine};
     use crate::lwm2m::ipso::ResourceType::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
     match (v, res_type) {
-        (SenmlValue::Int(i),   Time)    => serde_json::json!({"vt": *i, "ts": ts}),
-        (SenmlValue::Int(i),   _)       => serde_json::json!({"vi": *i, "ts": ts}),
-        (SenmlValue::Float(f), _)       => serde_json::json!({"vf": *f, "ts": ts}),
-        (SenmlValue::Str(s),   _)       => serde_json::json!({"vs": s,  "ts": ts}),
-        (SenmlValue::Bool(b),  _)       => serde_json::json!({"vb": *b, "ts": ts}),
-        (SenmlValue::Bytes(b), _)       => serde_json::json!({"vo": STANDARD.encode(b), "ts": ts}),
+        (SenmlValue::Int(i), Time) => serde_json::json!({"vt": *i, "ts": ts}),
+        (SenmlValue::Int(i), _) => serde_json::json!({"vi": *i, "ts": ts}),
+        (SenmlValue::Float(f), _) => serde_json::json!({"vf": *f, "ts": ts}),
+        (SenmlValue::Str(s), _) => serde_json::json!({"vs": s,  "ts": ts}),
+        (SenmlValue::Bool(b), _) => serde_json::json!({"vb": *b, "ts": ts}),
+        (SenmlValue::Bytes(b), _) => serde_json::json!({"vo": STANDARD.encode(b), "ts": ts}),
     }
 }
 
@@ -722,40 +853,74 @@ fn encode_array_value(
     res_type: &crate::lwm2m::ipso::ResourceType,
     ts: u64,
 ) -> serde_json::Value {
-    use base64::{engine::general_purpose::STANDARD, Engine};
     use crate::lwm2m::ipso::ResourceType::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
     match res_type {
         String => {
-            let arr: Vec<_> = values.iter()
-                .filter_map(|v| if let SenmlValue::Str(s) = v { Some(s.as_str()) } else { None })
-                .map(serde_json::Value::from).collect();
+            let arr: Vec<_> = values
+                .iter()
+                .filter_map(|v| {
+                    if let SenmlValue::Str(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .map(serde_json::Value::from)
+                .collect();
             serde_json::json!({"as": arr, "ts": ts})
         }
         Boolean => {
-            let arr: Vec<_> = values.iter()
-                .filter_map(|v| if let SenmlValue::Bool(b) = v { Some(*b) } else { None })
-                .map(serde_json::Value::from).collect();
+            let arr: Vec<_> = values
+                .iter()
+                .filter_map(|v| {
+                    if let SenmlValue::Bool(b) = v {
+                        Some(*b)
+                    } else {
+                        None
+                    }
+                })
+                .map(serde_json::Value::from)
+                .collect();
             serde_json::json!({"ab": arr, "ts": ts})
         }
         Opaque => {
-            let arr: Vec<_> = values.iter()
-                .filter_map(|v| if let SenmlValue::Bytes(b) = v { Some(STANDARD.encode(b)) } else { None })
-                .map(serde_json::Value::from).collect();
+            let arr: Vec<_> = values
+                .iter()
+                .filter_map(|v| {
+                    if let SenmlValue::Bytes(b) = v {
+                        Some(STANDARD.encode(b))
+                    } else {
+                        None
+                    }
+                })
+                .map(serde_json::Value::from)
+                .collect();
             serde_json::json!({"ao": arr, "ts": ts})
         }
         // Integer, Float, Time, UnsignedInteger, CoreLink → ai / af
         _ => {
             if values.iter().all(|v| matches!(v, SenmlValue::Int(_))) {
-                let arr: Vec<i64> = values.iter()
-                    .filter_map(|v| if let SenmlValue::Int(i) = v { Some(*i) } else { None })
+                let arr: Vec<i64> = values
+                    .iter()
+                    .filter_map(|v| {
+                        if let SenmlValue::Int(i) = v {
+                            Some(*i)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 serde_json::json!({"ai": arr, "ts": ts})
             } else {
-                let arr: Vec<f64> = values.iter().filter_map(|v| match v {
-                    SenmlValue::Int(i)   => Some(*i as f64),
-                    SenmlValue::Float(f) => Some(*f),
-                    _                    => None,
-                }).collect();
+                let arr: Vec<f64> = values
+                    .iter()
+                    .filter_map(|v| match v {
+                        SenmlValue::Int(i) => Some(*i as f64),
+                        SenmlValue::Float(f) => Some(*f),
+                        _ => None,
+                    })
+                    .collect();
                 serde_json::json!({"af": arr, "ts": ts})
             }
         }
@@ -869,7 +1034,9 @@ async fn send_con_write_step(
     }
 
     registry.cancel_write_ack(&token).await;
-    Err(crate::error::Error::Coap("bootstrap write: max retransmits exceeded".into()))
+    Err(crate::error::Error::Coap(
+        "bootstrap write: max retransmits exceeded".into(),
+    ))
 }
 
 fn build_delete(mid: u16, token: &[u8], path: &[&str]) -> Result<Vec<u8>> {
@@ -881,7 +1048,8 @@ fn build_delete(mid: u16, token: &[u8], path: &[&str]) -> Result<Vec<u8>> {
     for part in path {
         pkt.add_option(CoapOption::UriPath, part.as_bytes().to_vec());
     }
-    pkt.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
+    pkt.to_bytes()
+        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
 }
 
 fn build_put(mid: u16, token: &[u8], path: &[&str], cf: u16, payload: Vec<u8>) -> Result<Vec<u8>> {
@@ -893,10 +1061,15 @@ fn build_put(mid: u16, token: &[u8], path: &[&str], cf: u16, payload: Vec<u8>) -
     for part in path {
         pkt.add_option(CoapOption::UriPath, part.as_bytes().to_vec());
     }
-    let cf_bytes = if cf <= 0xFF { vec![cf as u8] } else { vec![(cf >> 8) as u8, cf as u8] };
+    let cf_bytes = if cf <= 0xFF {
+        vec![cf as u8]
+    } else {
+        vec![(cf >> 8) as u8, cf as u8]
+    };
     pkt.add_option(CoapOption::ContentFormat, cf_bytes);
     pkt.payload = payload;
-    pkt.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
+    pkt.to_bytes()
+        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
 }
 
 fn build_post_bs(mid: u16, token: &[u8]) -> Result<Vec<u8>> {
@@ -906,7 +1079,8 @@ fn build_post_bs(mid: u16, token: &[u8]) -> Result<Vec<u8>> {
     pkt.header.message_id = mid;
     pkt.set_token(token.to_vec());
     pkt.add_option(CoapOption::UriPath, b"bs".to_vec());
-    pkt.to_bytes().map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
+    pkt.to_bytes()
+        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -919,7 +1093,6 @@ fn make_response(request: &Packet, status: Status) -> Packet {
     response.set_token(request.get_token().to_vec());
     response
 }
-
 
 fn uri_path(packet: &Packet) -> String {
     packet
@@ -950,7 +1123,10 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
         .split('&')
         .filter_map(|kv| {
             let mut parts = kv.splitn(2, '=');
-            Some((parts.next()?.to_owned(), parts.next().unwrap_or("").to_owned()))
+            Some((
+                parts.next()?.to_owned(),
+                parts.next().unwrap_or("").to_owned(),
+            ))
         })
         .collect()
 }
@@ -965,7 +1141,9 @@ fn parse_link_format(body: &str) -> (Vec<String>, std::collections::HashMap<u32,
 
     for link in body.split(',') {
         let link = link.trim();
-        let Some(angle_end) = link.find('>') else { continue };
+        let Some(angle_end) = link.find('>') else {
+            continue;
+        };
         // Strip leading '<' and trailing '>'
         let path = link[1..angle_end].trim_start_matches('/').to_owned();
 
@@ -992,14 +1170,28 @@ fn parse_link_format(body: &str) -> (Vec<String>, std::collections::HashMap<u32,
 }
 
 fn format_resource_value(val: &serde_json::Value) -> String {
-    if let Some(v) = val.get("vs").and_then(|v| v.as_str()) { return format!("'{v}'"); }
-    if let Some(v) = val.get("vi") { return v.to_string(); }
-    if let Some(v) = val.get("vf") { return v.to_string(); }
-    if let Some(v) = val.get("vb") { return v.to_string(); }
-    if let Some(v) = val.get("vt") { return v.to_string(); }
-    if let Some(v) = val.get("vo").and_then(|v| v.as_str()) { return format!("'{v}'"); }
+    if let Some(v) = val.get("vs").and_then(|v| v.as_str()) {
+        return format!("'{v}'");
+    }
+    if let Some(v) = val.get("vi") {
+        return v.to_string();
+    }
+    if let Some(v) = val.get("vf") {
+        return v.to_string();
+    }
+    if let Some(v) = val.get("vb") {
+        return v.to_string();
+    }
+    if let Some(v) = val.get("vt") {
+        return v.to_string();
+    }
+    if let Some(v) = val.get("vo").and_then(|v| v.as_str()) {
+        return format!("'{v}'");
+    }
     for key in ["ai", "ab", "as", "af", "ao"] {
-        if let Some(v) = val.get(key) { return v.to_string(); }
+        if let Some(v) = val.get(key) {
+            return v.to_string();
+        }
     }
     val.to_string()
 }

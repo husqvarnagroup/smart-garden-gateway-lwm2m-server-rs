@@ -6,10 +6,16 @@ pub mod server;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use coap_lite::Packet;
-use tokio::{net::UdpSocket, sync::{Mutex, oneshot}};
+use tokio::{
+    net::UdpSocket,
+    sync::{oneshot, Mutex},
+};
 use tracing::info;
 
-use crate::{error::Result, model::{LwM2mError, ResourceValue}};
+use crate::{
+    error::Result,
+    model::{LwM2mError, ResourceValue},
+};
 
 /// Map from CoAP token to a waiting receiver for the next ACK packet.
 /// Used to route intermediate 2.31 Continue ACKs to the block-write task
@@ -58,7 +64,10 @@ pub(super) fn coap_response_to_result(packet: &Packet) -> crate::model::LwM2mRes
                 Err(LwM2mError::CoapError { class, detail })
             }
         }
-        _ => Err(LwM2mError::CoapError { class: 5, detail: 0 }),
+        _ => Err(LwM2mError::CoapError {
+            class: 5,
+            detail: 0,
+        }),
     }
 }
 
@@ -86,7 +95,11 @@ pub fn set_tclass(socket: &UdpSocket, tc: u32) {
 pub async fn bind(addr: SocketAddr, interface: Option<&str>) -> Result<Arc<UdpSocket>> {
     use socket2::{Domain, Protocol, Socket, Type};
 
-    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
 
@@ -116,7 +129,6 @@ pub async fn bind(addr: SocketAddr, interface: Option<&str>) -> Result<Arc<UdpSo
 pub mod content_format {
     pub const SENML_CBOR: u16 = 112;
 }
-
 
 /// Extract the bare SGTIN from a CoAP `ep` parameter that may carry a full URN.
 ///
