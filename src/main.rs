@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use tracing_subscriber::{Layer as _, util::SubscriberInitExt as _, prelude::__tracing_subscriber_SubscriberExt as _};
 
 use std::sync::Arc;
 
@@ -17,15 +18,28 @@ use lwm2mserver_rs::{
     ipso::IpsoModel,
     persistence::PersistenceStore,
     registry::DeviceRegistry,
+    syslog_layer::SyslogLayer,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lwm2mserver_rs=info".into()),
-        )
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "lwm2mserver_rs=info".into());
+
+    let journal = std::env::var_os("JOURNAL_STREAM").is_some();
+    let syslog = if journal { SyslogLayer::try_new() } else { None };
+    let suppress_fmt = journal && syslog.is_some();
+    let fmt = tracing_subscriber::fmt::layer()
+        .with_filter(if suppress_fmt {
+            tracing_subscriber::filter::LevelFilter::OFF
+        } else {
+            tracing_subscriber::filter::LevelFilter::TRACE
+        });
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(syslog)
+        .with(fmt)
         .init();
 
     let cfg = Config::from_args().map_err(|e| anyhow::anyhow!("{e}"))?;
