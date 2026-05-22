@@ -11,14 +11,9 @@ use tracing_subscriber::{
 };
 
 /// Event formatter: `TIMESTAMP LEVEL target: [k=v k=v] message`
+#[derive(Default)]
 pub struct PrefixedFields {
     timer: SystemTime,
-}
-
-impl Default for PrefixedFields {
-    fn default() -> Self {
-        Self { timer: SystemTime::default() }
-    }
 }
 
 impl<S, N> FormatEvent<S, N> for PrefixedFields

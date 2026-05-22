@@ -150,14 +150,14 @@ impl DeviceRegistry {
             let needs_ping = match dev.online {
                 Some(true) => {
                     dev.last_contact.elapsed() >= online_interval
-                        && dev.last_ping_attempt.map_or(true, |t| t.elapsed() >= online_interval)
+                        && dev.last_ping_attempt.is_none_or(|t| t.elapsed() >= online_interval)
                 }
                 Some(false) => {
                     let within_window = dev
                         .offline_since
-                        .map_or(false, |t| t.elapsed() < offline_max_duration);
+                        .is_some_and(|t| t.elapsed() < offline_max_duration);
                     within_window
-                        && dev.last_ping_attempt.map_or(true, |t| t.elapsed() >= offline_interval)
+                        && dev.last_ping_attempt.is_none_or(|t| t.elapsed() >= offline_interval)
                 }
                 None => false,
             };
