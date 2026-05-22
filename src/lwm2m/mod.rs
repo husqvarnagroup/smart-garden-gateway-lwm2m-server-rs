@@ -3,12 +3,64 @@ pub mod client;
 pub mod ipso;
 pub mod server;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use tokio::net::UdpSocket;
+use coap_lite::Packet;
+use tokio::{net::UdpSocket, sync::{Mutex, oneshot}};
 use tracing::info;
 
-use crate::error::Result;
+use crate::{error::Result, model::{LwM2mError, ResourceValue}};
+
+/// Map from CoAP token to a waiting receiver for the next ACK packet.
+/// Used to route intermediate 2.31 Continue ACKs to the block-write task
+/// without involving the in-flight registry.
+pub type BlockAckMap = Arc<Mutex<HashMap<[u8; 8], oneshot::Sender<Packet>>>>;
+
+pub fn new_block_ack_map() -> BlockAckMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub(super) fn response_type_to_class_detail(status: coap_lite::ResponseType) -> (u8, u8) {
+    use coap_lite::ResponseType::*;
+    match status {
+        Created => (2, 1),
+        Deleted => (2, 2),
+        Valid => (2, 3),
+        Changed => (2, 4),
+        Content => (2, 5),
+        BadRequest => (4, 0),
+        Unauthorized => (4, 1),
+        BadOption => (4, 2),
+        Forbidden => (4, 3),
+        NotFound => (4, 4),
+        MethodNotAllowed => (4, 5),
+        NotAcceptable => (4, 6),
+        PreconditionFailed => (4, 12),
+        RequestEntityTooLarge => (4, 13),
+        UnsupportedContentFormat => (4, 15),
+        InternalServerError => (5, 0),
+        NotImplemented => (5, 1),
+        BadGateway => (5, 2),
+        ServiceUnavailable => (5, 3),
+        GatewayTimeout => (5, 4),
+        ProxyingNotSupported => (5, 5),
+        _ => (5, 0),
+    }
+}
+
+pub(super) fn coap_response_to_result(packet: &Packet) -> crate::model::LwM2mResult {
+    match packet.header.code {
+        coap_lite::MessageClass::Response(status) => {
+            let (class, detail) = response_type_to_class_detail(status);
+            if class == 2 {
+                Ok(ResourceValue::CoapResponse { class, detail })
+            } else {
+                Err(LwM2mError::CoapError { class, detail })
+            }
+        }
+        _ => Err(LwM2mError::CoapError { class: 5, detail: 0 }),
+    }
+}
 
 /// IPv6 Traffic Class: no MAC-layer encryption (bootstrap phase).
 pub const TC_PLAIN: u32 = 0x0c;

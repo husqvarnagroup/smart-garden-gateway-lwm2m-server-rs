@@ -14,12 +14,12 @@ use crate::{
     },
     error::Result,
     ipc::event::EventSender,
-    model::{LwM2mError, PendingOperation, ResourceValue},
+    model::{LwM2mError, PendingOperation},
     persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
 
-use super::{content_format::SENML_CBOR, set_tclass, TC_ENCRYPTED, TC_PLAIN};
+use super::{content_format::SENML_CBOR, set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN};
 
 const BS_PATH: &str = "bs";
 const DP_PATH: &str = "dp";
@@ -38,6 +38,7 @@ pub async fn run(
     event_sender: EventSender,
     ipso: Arc<IpsoModel>,
     persistence: Arc<PersistenceStore>,
+    block_acks: BlockAckMap,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_PACKET];
@@ -59,6 +60,7 @@ pub async fn run(
                             event_sender: &event_sender,
                             ipso: &ipso,
                             persistence: &persistence,
+                            block_acks: &block_acks,
                         };
                         if let Err(e) = handle_packet(&buf[..len], addr, &ctx).await {
                             warn!(%addr, "Error handling CoAP packet: {e}");
@@ -86,6 +88,7 @@ struct ServerCtx<'a> {
     event_sender: &'a EventSender,
     ipso: &'a Arc<IpsoModel>,
     persistence: &'a Arc<PersistenceStore>,
+    block_acks: &'a BlockAckMap,
 }
 
 async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
@@ -114,7 +117,7 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
         }
         // Device acknowledging one of our downlink requests.
         MessageType::Acknowledgement => {
-            handle_ack(packet, addr, ctx.registry, ctx.bootstrap_registry).await?;
+            handle_ack(packet, addr, ctx.registry, ctx.bootstrap_registry, ctx.block_acks).await?;
         }
         MessageType::Reset => {
             // Device rejected our message — treat as error for the in-flight op.
@@ -123,8 +126,12 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
                 warn!(%addr, "Bootstrap GET /0/0 reset by device");
             } else if ctx.bootstrap_registry.complete_write_ack(&token, false).await {
                 warn!(%addr, "Bootstrap write op reset by device");
-            } else if let Some(op) = ctx.registry.complete_in_flight(addr, &token).await {
-                let _ = op.response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
+            } else {
+                // Drop the block-write sender (if any) — signals error to the block task.
+                ctx.block_acks.lock().await.remove(&token);
+                if let Some(op) = ctx.registry.complete_in_flight(addr, &token).await {
+                    let _ = op.response_tx.send(Err(LwM2mError::CoapError { class: 5, detail: 0 }));
+                }
             }
         }
     }
@@ -398,6 +405,7 @@ async fn handle_ack(
     addr: SocketAddr,
     registry: &DeviceRegistry,
     bootstrap_registry: &BootstrapRegistry,
+    block_acks: &BlockAckMap,
 ) -> Result<()> {
     let token = token_array(packet.get_token());
 
@@ -419,12 +427,18 @@ async fn handle_ack(
         return Ok(());
     }
 
+    // Block-wise transfer ACK (2.31 Continue or final response for block writes).
+    if let Some(tx) = block_acks.lock().await.remove(&token) {
+        let _ = tx.send(packet);
+        return Ok(());
+    }
+
     let Some(op) = registry.complete_in_flight(addr, &token).await else {
         // Spurious or duplicate ACK — ignore.
         return Ok(());
     };
 
-    let _ = op.response_tx.send(coap_response_to_result(&packet));
+    let _ = op.response_tx.send(super::coap_response_to_result(&packet));
     Ok(())
 }
 
@@ -843,48 +857,6 @@ fn build_post_bs(mid: u16, token: &[u8]) -> Result<Vec<u8>> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-fn coap_response_to_result(packet: &Packet) -> crate::model::LwM2mResult {
-    match packet.header.code {
-        MessageClass::Response(status) => {
-            let (class, detail) = response_type_to_class_detail(status);
-            if class == 2 {
-                Ok(ResourceValue::CoapResponse { class, detail })
-            } else {
-                Err(LwM2mError::CoapError { class, detail })
-            }
-        }
-        _ => Err(LwM2mError::CoapError { class: 5, detail: 0 }),
-    }
-}
-
-fn response_type_to_class_detail(status: coap_lite::ResponseType) -> (u8, u8) {
-    use coap_lite::ResponseType::*;
-    match status {
-        Created => (2, 1),
-        Deleted => (2, 2),
-        Valid => (2, 3),
-        Changed => (2, 4),
-        Content => (2, 5),
-        BadRequest => (4, 0),
-        Unauthorized => (4, 1),
-        BadOption => (4, 2),
-        Forbidden => (4, 3),
-        NotFound => (4, 4),
-        MethodNotAllowed => (4, 5),
-        NotAcceptable => (4, 6),
-        PreconditionFailed => (4, 12),
-        RequestEntityTooLarge => (4, 13),
-        UnsupportedContentFormat => (4, 15),
-        InternalServerError => (5, 0),
-        NotImplemented => (5, 1),
-        BadGateway => (5, 2),
-        ServiceUnavailable => (5, 3),
-        GatewayTimeout => (5, 4),
-        ProxyingNotSupported => (5, 5),
-        _ => (5, 0),
-    }
-}
 
 fn make_response(request: &Packet, status: Status) -> Packet {
     let mut response = Packet::new();

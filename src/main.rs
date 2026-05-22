@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let (coap_dispatch_tx, coap_dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
     let coap_dispatch_tx_ipc = coap_dispatch_tx.clone();
     let coap_dispatch_tx_hk = coap_dispatch_tx.clone();
+    let block_acks = lwm2m::new_block_ack_map();
 
     {
         let cancel = cancel.clone();
@@ -96,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
             event_sender.clone(),
             ipso.clone(),
             persistence,
+            block_acks.clone(),
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap server: {e}"))? }
 
@@ -104,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
             registry.clone(),
             coap_dispatch_rx,
             event_sender.clone(),
+            block_acks,
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("coap dispatch: {e}"))? }
 
