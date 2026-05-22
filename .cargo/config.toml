@@ -1,3 +1,12 @@
 # Cross-compilation settings.
-# When using `cross build --target armv5te-unknown-linux-gnueabi`, cross manages
-# the toolchain inside its Docker container — no manual linker/CC overrides needed.
+# When using `cross build --target <triple>`, cross manages the toolchain inside
+# its Docker container — no manual linker/CC overrides needed.
+
+[target.mipsel-unknown-linux-gnu]
+# The MT7688 userspace is soft-float (glibc, libpthread, etc. all built with -msoft-float).
+# mipsel-unknown-linux-gnu defaults to +fpxx; the Debian cross toolchain has no soft-float
+# multilib, so we compile Rust code as soft-float and fix the two FP-ABI ELF fields
+# (PT_MIPS_ABIFLAGS.fp_abi and .gnu.attributes) with build-mips.sh after the link.
+# --as-needed: Rust's unwind crate requests -lgcc_s; our unwind_stubs.rs satisfies all
+# _Unwind_* symbols first so libgcc_s.so.1 is skipped (no DT_NEEDED entry emitted).
+rustflags = ["-C", "target-feature=+soft-float", "-C", "link-arg=-Wl,--as-needed"]

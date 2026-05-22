@@ -1,0 +1,2 @@
+[target.mipsel-unknown-linux-gnu]
+build-std = ["std", "panic_abort"]

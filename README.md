@@ -15,7 +15,7 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 - [Target hardware](#target-hardware)
 - [Development setup](#development-setup-one-time)
 - [Build](#build)
-- [Deploy to gateway](#deploy-to-gateway)
+- [MIPS cross-compilation notes](#mips-cross-compilation-notes)
 - [Usage](#usage)
 - [IPC sockets](#ipc-sockets)
   - [Command socket](#command-socket----tmplwm2mserver-commandipc)
@@ -41,19 +41,20 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 - **IPC socket reconnection** — clients connecting to the command or event socket after a service restart must reconnect manually; the sockets are recreated on startup but there is no reconnection or keep-alive mechanism on the service side.
 - **Firmware update support** — OTA firmware update via LWM2M Firmware Update object (object 5) is not yet implemented.
 - **Mower compatibility** — protocol or object-model differences for mower devices have not been validated; compatibility work is pending.
-- **Cross-compilation to LCGW** — the build currently targets the GARDENA smart Gateway (ARMv5TE); cross-compilation and deployment to the LCGW platform has not been set up yet.
 
 ---
 
 ## Target hardware
 
-| Property | Value |
-|---|---|
-| Device | GARDENA smart Gateway |
-| CPU | ARMv5TE (`armv5tejl`) |
-| OS | OpenEmbedded Linux, systemd, BusyBox |
-| Radio interface | `ppp0` — IPv6-only PPP over `/dev/ttyS1` at 500000 baud |
-| Gateway IPv6 | `fc00::6:100:0:0/64` (ULA) + `fe80::…` link-local on ppp0 |
+OS, BusyBox, and radio interface (`ppp0` — IPv6-only PPP over `/dev/ttyS1` at 500 000 baud) are identical on both gateways.
+
+| Property | GARDENA smart Gateway | LCGW / MT7688 |
+|---|---|---|
+| CPU | ARMv5TE (`armv5tejl`) | MediaTek MT7688 — MIPS 24KEc V5.5, MIPS32r2 |
+| C library ABI | hard-float | soft-float — glibc, libpthread, libm, libdl all compiled `-msoft-float` |
+| Gateway IPv6 | `fc00::6:100:0:0/64` (ULA) + `fe80::…` link-local | — |
+| Rust target | `armv5te-unknown-linux-gnueabi` | `mipsel-unknown-linux-gnu` |
+| Build script | `./build-arm.sh` | `./build-mips.sh` |
 
 ---
 
@@ -63,15 +64,28 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) — must be running for cross-compilation
 - Rust toolchain via [rustup](https://rustup.rs)
-
-### Install cross and the target
+- `cross` — wraps `cargo` with Docker-based sysroots; no host C toolchain needed:
 
 ```bash
 cargo install cross
+```
+
+### ARM target
+
+The ARM build uses a pre-compiled Rust standard library, so the target component must be installed:
+
+```bash
 rustup target add armv5te-unknown-linux-gnueabi
 ```
 
-`cross` uses Docker to provide the ARM sysroot and C toolchain. No separate ARM GCC installation is needed on the host.
+### MIPS target
+
+The MIPS build compiles `std` from source (`build-std`), so no target component is needed. Only a nightly toolchain with `rust-src` is required:
+
+```bash
+rustup toolchain install nightly
+rustup component add rust-src --toolchain nightly
+```
 
 ---
 
@@ -84,24 +98,25 @@ cargo build
 cargo clippy
 ```
 
-### Release build for the gateway
+### Release build
+
+Both scripts accept an optional `root@<ip>` argument to deploy immediately after building:
 
 ```bash
-cross build --release --target armv5te-unknown-linux-gnueabi
+./build-arm.sh [root@192.168.1.x]   # GARDENA smart Gateway (ARM)
+./build-mips.sh [root@192.168.1.x]  # LCGW / MT7688 (MIPS)
 ```
 
-Output: `target/armv5te-unknown-linux-gnueabi/release/lwm2mserver-rs`
+The MIPS script additionally patches two ELF fields that encode the float ABI after linking (see [MIPS cross-compilation notes](#mips-cross-compilation-notes)). Deployment uses `scp -O` (legacy SCP protocol — required because the gateway's BusyBox SSH has no SFTP server).
 
----
+### Release profile
 
-## Deploy to gateway
+The `[profile.release]` in `Cargo.toml` includes `panic = "abort"`. With this setting:
 
-```bash
-scp -O target/armv5te-unknown-linux-gnueabi/release/lwm2mserver-rs \
-    root@192.168.1.61:/usr/local/bin/
-```
-
-The `-O` flag forces legacy SCP protocol — required because the gateway's BusyBox SSH does not include an SFTP server.
+- **Binary size**: unwinding tables (`.ARM.extab` / `.MIPS.eh_frame`) and landing-pad code are eliminated. On ARM this removed ~221 KB (12%) from the binary.
+- **Panic behaviour**: a panic still prints its message to stderr, then calls `abort()`. The process terminates and systemd restarts it — the same outcome as an unwinding panic for this service.
+- **No per-frame cleanup on panic**: `Drop` implementations are not called for locals on the panicking call stack. For this service the practical consequences are benign: file descriptors are closed by the OS, and the atomic-write pattern (write to `.tmp` → rename) ensures persistence files are never left in a corrupt state.
+- **Tokio task isolation**: tokio uses `catch_unwind` internally to isolate panicking tasks. With `panic = "abort"`, that catch is bypassed and a panic in any task kills the whole process. This matches the existing design intent — the `tokio::select!` in `main` already brings down the process on any task error.
 
 ---
 
@@ -376,6 +391,45 @@ The server persists state to `/var/lib/lwm2mserver/` across restarts:
 | `devices/<sgtin>.json` | Accumulated IPSO state per device from `/dp` payloads. Written on every data push. Deleted on device factory reset. |
 
 All writes are atomic (write to `.tmp`, then `rename`). On startup, restored devices are placed in the offline state regardless of their persisted status; the connectivity ping mechanism determines their actual online state within the first minute.
+
+---
+
+## MIPS cross-compilation notes
+
+Getting a binary that runs on the MT7688 soft-float glibc userspace required working around three independent problems in the toolchain.
+
+### 1. No soft-float multilib in the Debian cross toolchain
+
+The `cross` Docker image for `mipsel-unknown-linux-gnu` (based on Debian's `gcc-mipsel-linux-gnu` package) ships only a single sysroot — hard-float / FPXX. There is no soft-float multilib, so passing `-msoft-float` to the GCC linker driver has no effect: it still links against the FPXX `Scrt1.o` startup file.
+
+**Workaround**: The Rust code itself is compiled soft-float via `target-feature=+soft-float`. `Scrt1.o` contains only ABI-agnostic startup code (stack setup, calling `main`) with no actual floating-point instructions; the only thing wrong is the ELF attribute it contributes. After the build, `build-mips.sh` patches the two ELF fields that encode the float ABI:
+
+- `PT_MIPS_ABIFLAGS.fp_abi` (byte 7 of the `PT_MIPS_ABIFLAGS` segment) — **this is what glibc's `ld.so` actually checks at runtime**.
+- `.gnu.attributes` section, `Tag_GNU_MIPS_ABI_FP` — informational; patched for consistency.
+
+Both are changed from `5` (FPXX / `Val_GNU_MIPS_ABI_FP_XX`) to `3` (soft-float / `Val_GNU_MIPS_ABI_FP_SOFT`).
+
+> **Note**: glibc's `ld.so` reads `PT_MIPS_ABIFLAGS`, not `.gnu.attributes`. Patching only `.gnu.attributes` is insufficient.
+
+### 2. `libgcc_s.so.1` runtime dependency
+
+Rust's `unwind` crate always emits `cargo:rustc-link-lib=gcc_s` (dynamic link), pulling in `libgcc_s.so.1` regardless of `panic = "abort"`. The MT7688 has only a hard-float `libgcc_s.so.1` — the only file on the system with a mismatched float ABI — so the dynamic linker rejects it.
+
+**Workaround**: Two parts:
+1. `src/unwind_stubs.rs` provides no-op `#[no_mangle]` implementations of every `_Unwind_*` symbol that would otherwise come from `libgcc_s.so.1`. These are compiled by rustc for the correct soft-float ABI.
+2. `build.rs` writes a fake `libgcc_s.so` linker script to `$OUT_DIR` (which takes precedence in the link search path). When the linker resolves `-lgcc_s` it finds this empty script first, so `libgcc_s.so.1` is never added to `DT_NEEDED`.
+3. `--as-needed` in `rustflags` provides a belt-and-suspenders: shared libraries with no unresolved symbol references (which is the case after our stubs satisfy all `_Unwind_*`) are excluded from `DT_NEEDED`.
+
+### 3. `build-std` requires nightly Rust
+
+No pre-built `rust-std` artifact exists for `mipsel-unknown-linux-gnu`, so `std` must be compiled from source via `build-std`. This is configured in `Cross.toml`:
+
+```toml
+[target.mipsel-unknown-linux-gnu]
+build-std = ["std", "panic_abort"]
+```
+
+`build-std` is a nightly-only feature, hence `cross +nightly build …`.
 
 ---
 
