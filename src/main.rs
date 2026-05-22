@@ -18,6 +18,7 @@ use lwm2mserver_rs::{
     ipso::IpsoModel,
     persistence::PersistenceStore,
     registry::DeviceRegistry,
+    console_fmt::PrefixedFields,
     syslog_layer::SyslogLayer,
 };
 
@@ -30,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
     let syslog = if journal { SyslogLayer::try_new() } else { None };
     let suppress_fmt = journal && syslog.is_some();
     let fmt = tracing_subscriber::fmt::layer()
+        .event_format(PrefixedFields::default())
         .with_filter(if suppress_fmt {
             tracing_subscriber::filter::LevelFilter::OFF
         } else {

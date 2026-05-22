@@ -1,4 +1,5 @@
 pub mod bootstrap;
+pub mod console_fmt;
 pub mod syslog_layer;
 pub mod coap;
 pub mod config;
