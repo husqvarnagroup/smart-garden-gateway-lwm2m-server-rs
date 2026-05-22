@@ -169,7 +169,7 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
         // POST /dp  — device data push (SenML+CBOR state report after registration)
         [p] if *p == DP_PATH => {
             let ipso = ctx.ipso.read().unwrap().clone();
-            handle_dp(packet, addr, ctx.socket, ctx.registry, ctx.event_sender, &*ipso, ctx.persistence).await?;
+            handle_dp(packet, addr, ctx.socket, ctx.registry, ctx.event_sender, &ipso, ctx.persistence).await?;
         }
         _ => {
             warn!(%addr, path, "POST to unknown path");

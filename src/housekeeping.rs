@@ -52,7 +52,7 @@ pub async fn run(
                 registry.timeout_in_flight(IN_FLIGHT_TIMEOUT_SECS).await;
                 bootstrap_registry.expire_stale(BOOTSTRAP_TIMEOUT_SECS).await;
 
-                let ping_path = resolve_ping_path(&*ipso.read().unwrap());
+                let ping_path = resolve_ping_path(&ipso.read().unwrap());
                 if let Some(ref path) = ping_path {
                     let candidates = registry
                         .take_ping_candidates(
