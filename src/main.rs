@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{Layer as _, util::SubscriberInitExt as _, prelude::__tracing_subscriber_SubscriberExt as _};
 
 use std::sync::Arc;
@@ -55,17 +55,38 @@ async fn main() -> anyhow::Result<()> {
 
     // Restore persisted state before starting the server.
     let snapshots = persistence.load_registry();
-    if !snapshots.is_empty() {
-        info!(count = snapshots.len(), "Restoring devices");
-        registry.restore(snapshots).await;
-    }
     let included = persistence.load_included();
+
+    // Consistency check: wakaama.json must be a subset of included_devices.json.
+    // Drop any registry entry not in the included list and clean up its state file.
+    let included_set: std::collections::HashSet<&str> =
+        included.iter().map(String::as_str).collect();
+    let (valid_snapshots, orphaned): (Vec<_>, Vec<_>) = snapshots
+        .into_iter()
+        .partition(|s| included_set.contains(s.endpoint.as_str()));
+    if !orphaned.is_empty() {
+        for s in &orphaned {
+            warn!(device = %s.endpoint, "Dropping orphaned registry entry (not in included list)");
+            persistence.delete_device_state(&s.endpoint);
+        }
+        persistence.save_registry(&valid_snapshots);
+    }
+
+    if !valid_snapshots.is_empty() {
+        info!(count = valid_snapshots.len(), "Restoring devices");
+        registry.restore(valid_snapshots).await;
+    }
     if !included.is_empty() {
         info!(count = included.len(), "Restoring included devices");
-        bootstrap_registry.load_included(included).await;
+        bootstrap_registry.load_included(included.clone()).await;
     }
     for (ep, state) in persistence.load_all_device_states() {
-        registry.restore_device_state(&ep, state).await;
+        if included_set.contains(ep.as_str()) {
+            registry.restore_device_state(&ep, state).await;
+        } else {
+            warn!(device = %ep, "Deleting orphaned device state (not in included list)");
+            persistence.delete_device_state(&ep);
+        }
     }
 
     let socket = lwm2m::bind(cfg.coap_bind_addr, cfg.coap_interface.as_deref())
