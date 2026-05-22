@@ -85,7 +85,7 @@ impl DeviceRegistry {
             let now = std::time::Instant::now();
             dev.registered_at = now;
             dev.last_contact = now;
-            info!(endpoint, id, "Device registered");
+            info!(device = %endpoint, id, activity = "registration", "Device registered");
             return id;
         }
 
@@ -97,7 +97,7 @@ impl DeviceRegistry {
         inner.by_endpoint.insert(endpoint.clone(), id);
         inner.by_addr.insert(addr, id);
 
-        info!(endpoint, id, "New device registered");
+        info!(device = %endpoint, id, activity = "registration", "New device registered");
         id
     }
 
@@ -179,7 +179,7 @@ impl DeviceRegistry {
         let mut removed = Vec::new();
         for id in expired {
             if let Some(dev) = inner.by_id.remove(&id) {
-                warn!(device = %dev.endpoint, "Registration expired, removing device");
+                warn!(device = %dev.endpoint, activity = "registration", "Registration expired, removing device");
                 inner.by_endpoint.remove(&dev.endpoint);
                 inner.by_addr.remove(&dev.addr);
 

@@ -131,7 +131,7 @@ async fn handle_request(req: &serde_json::Value, ctx: &IpcCtx) -> serde_json::Va
             match middle.parse::<u32>() {
                 Ok(id) => match ctx.bootstrap_registry.approve_inclusion(id).await {
                     Some(endpoint) => {
-                        info!(device = %endpoint, id, "IPC: inclusion approved");
+                        info!(device = %endpoint, id, activity = "inclusion", "IPC: inclusion approved");
                         serde_json::json!({"success": true})
                     }
                     None => {
@@ -227,7 +227,7 @@ async fn dispatch_and_await(
     };
 
     if ctx.dispatch_tx.send(DispatchRequest { addr: r.addr, ops: vec![op] }).await.is_err() {
-        warn!(device, path, "IPC {op_name}: dispatch channel closed");
+        warn!(device, path, activity = "control", "IPC {op_name}: dispatch channel closed");
         return serde_json::json!({"success": false});
     }
 
@@ -237,7 +237,7 @@ async fn dispatch_and_await(
             let code = (class as u16) * 32 + detail as u16;
             let name = coap_status_name(class, detail);
             let verb = if op_name == "execute" { "Executed" } else { "Written" };
-            info!(device, "{verb} resource {path}, success: true");
+            info!(device, activity = "control", "{verb} resource {path}, success: true");
             serde_json::json!({
                 "metadata": {
                     "lwm2m_client_id": dev_id,
@@ -249,15 +249,15 @@ async fn dispatch_and_await(
             })
         }
         Ok(Ok(Err(e))) => {
-            warn!(device, path, "IPC {op_name}: CoAP error {e:?}");
+            warn!(device, path, activity = "control", "IPC {op_name}: CoAP error {e:?}");
             serde_json::json!({"success": false})
         }
         Ok(Err(_)) => {
-            warn!(device, path, "IPC {op_name}: response channel dropped");
+            warn!(device, path, activity = "control", "IPC {op_name}: response channel dropped");
             serde_json::json!({"success": false})
         }
         Err(_) => {
-            warn!(device, path, "IPC {op_name}: timeout");
+            warn!(device, path, activity = "control", "IPC {op_name}: timeout");
             serde_json::json!({"success": false})
         }
         Ok(Ok(Ok(_))) => serde_json::json!({"success": false}),
