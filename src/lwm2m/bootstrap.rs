@@ -290,6 +290,14 @@ impl BootstrapRegistry {
         self.inner.lock().await.included.contains(endpoint)
     }
 
+    /// Remove a device's certificate payload from the cache.
+    ///
+    /// Called when the certificate fails validation so that the next /bs triggers
+    /// a fresh GET /0/0 and re-validates.
+    pub async fn remove_from_cert_cache(&self, endpoint: &str) {
+        self.inner.lock().await.cert_cache.remove(endpoint);
+    }
+
     /// Remove an endpoint from the included set (e.g. after device factory reset).
     pub async fn unmark_included(&self, endpoint: &str) {
         self.inner.lock().await.included.remove(endpoint);
@@ -429,6 +437,274 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
         }
     }
     crc
+}
+
+// ── Device certificate validation ─────────────────────────────────────────────
+//
+// Mirrors Python DeviceCertificate.valid(): checks issuer against known CAs,
+// validates KeyUsage (digitalSignature), ExtendedKeyUsage (clientAuth),
+// cryptographic signature, and presence of an sgtin: URI in the SAN.
+
+// smartsystem CA (original DK hardware)
+const CA1_PEM: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBwTCCAWegAwIBAgIUFp+DgiuciH+lGlQoMbfM4J1wf3QwCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLc21hcnRzeXN0ZW0wIBcNMjIwNjI5MTU1MTQ5WhgPMjEyMjA2
+MDUxNTUxNDlaMBYxFDASBgNVBAMMC3NtYXJ0c3lzdGVtMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAE4/iFiywk2Kaqh09YmYZjjz6mc4j4uStZA8V5DStJcwpOJZUf
+CWmya8NeyFyCHjr2hbaLLRiKRN6SutQ/QsyDpKOBkDCBjTAdBgNVHQ4EFgQUkA+i
+PMjLNA39Ini6wvHOhmNWZ7EwUQYDVR0jBEowSIAUkA+iPMjLNA39Ini6wvHOhmNW
+Z7GhGqQYMBYxFDASBgNVBAMMC3NtYXJ0c3lzdGVtghQWn4OCK5yIf6UaVCgxt8zg
+nXB/dDAMBgNVHRMEBTADAQH/MAsGA1UdDwQEAwIBBjAKBggqhkjOPQQDAgNIADBF
+AiEA4Y704Qdw18/YGf+ofKDanftPaYferEKgp9C8g4sFaRkCID7t4VCTkaBHmF8b
+mE52/8+DaLdJt7Yru4s1zRqxZPtT
+-----END CERTIFICATE-----
+";
+
+// GARDENA Device CA G1 (DMD hardware)
+const CA2_PEM: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBxzCCAW2gAwIBAgIUa4oBLgK3fA9G/ln5PUab4GkQ+REwCgYIKoZIzj0EAwQw
+NDEQMA4GA1UECgwHR0FSREVOQTEgMB4GA1UEAwwXc21hcnQgc3lzdGVtIFJvb3Qg
+Q0EgRzEwIBcNMjQwOTA1MTIwNTEyWhgPMjEyNDA4MTIxMjA1MTJaMCkxEDAOBgNV
+BAoMB0dBUkRFTkExFTATBgNVBAMMDERldmljZSBDQSBHMTBZMBMGByqGSM49AgEG
+CCqGSM49AwEHA0IABAClYNC4m4/PuV45hCDlke5ft2xeU/l7rla3A/aTX0ryi0xy
+em2Q/WE73tVD86lX0XShXI7KFE+DGcO0ngYcOp6jZjBkMB0GA1UdDgQWBBTayoee
+Qgkek/huZNKNzEhxSn5w+jAfBgNVHSMEGDAWgBTXpazeuEDoTGLylR/9B0kPW1El
+JjASBgNVHRMBAf8ECDAGAQH/AgEAMA4GA1UdDwEB/wQEAwIBhjAKBggqhkjOPQQD
+BANIADBFAiEAxTNrpX08iilKXmi8w+u3rr6DCgVMCSRnPABNADySFFQCID9Z76d/
+J6iIDd+grM5DAdVOc/E8xC8OvbaraUtKcIet
+-----END CERTIFICATE-----
+";
+
+fn pem_to_der(pem: &str) -> crate::error::Result<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("");
+    STANDARD
+        .decode(&body)
+        .map_err(|e| crate::error::Error::Bootstrap(format!("PEM base64: {e}")))
+}
+
+/// Validate a DER-encoded device certificate against the two known CAs.
+///
+/// Checks (in order, matching Python `DeviceCertificate.valid()`):
+///   1. Issuer matches a known CA subject.
+///   2. KeyUsage extension is present and has digitalSignature.
+///   3. ExtendedKeyUsage extension is present and contains clientAuth.
+///   4. CA signature over TBS bytes is valid (P-256 / SHA-256).
+///   5. SubjectAltName contains a URI starting with "sgtin:".
+pub fn validate_device_certificate(cert_der: &[u8]) -> crate::error::Result<()> {
+    use x509_cert::der::Decode;
+
+    let cert = x509_cert::Certificate::from_der(cert_der)
+        .map_err(|e| crate::error::Error::Bootstrap(format!("device cert decode: {e}")))?;
+
+    // Load and parse both CAs; find the one whose subject matches this cert's issuer.
+    let ca = [CA1_PEM, CA2_PEM]
+        .iter()
+        .find_map(|pem| {
+            let der = pem_to_der(pem).ok()?;
+            let ca_cert = x509_cert::Certificate::from_der(&der).ok()?;
+            if ca_cert.tbs_certificate.subject == cert.tbs_certificate.issuer {
+                Some(ca_cert)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| crate::error::Error::Bootstrap("certificate from unknown issuer".into()))?;
+
+    cert_check_key_usage(&cert)?;
+    cert_check_eku(&cert)?;
+    cert_verify_signature(&cert, &ca, cert_der)?;
+    cert_check_sgtin(&cert)?;
+
+    Ok(())
+}
+
+/// Check that the KeyUsage extension is present and has the digitalSignature bit set.
+fn cert_check_key_usage(cert: &x509_cert::Certificate) -> crate::error::Result<()> {
+    // id-ce-keyUsage = 2.5.29.15
+    // Extension value: OctetString wrapping DER BIT STRING.
+    // BIT STRING value bytes: [unused_bits, data...]; bit 0 (MSB) = digitalSignature.
+    let ext_val = find_extension(cert, &[0x55, 0x1d, 0x0f])
+        .ok_or_else(|| crate::error::Error::Bootstrap("missing KeyUsage extension".into()))?;
+
+    let mut iter = DerItemIter::new(ext_val);
+    let Some((0x03, bs)) = iter.next() else {
+        return Err(crate::error::Error::Bootstrap("KeyUsage: expected BIT STRING".into()));
+    };
+    if bs.len() < 2 || bs[1] & 0x80 == 0 {
+        return Err(crate::error::Error::Bootstrap("digitalSignature not set".into()));
+    }
+    Ok(())
+}
+
+/// Check that the ExtendedKeyUsage extension is present and contains clientAuth.
+fn cert_check_eku(cert: &x509_cert::Certificate) -> crate::error::Result<()> {
+    // id-ce-extKeyUsage = 2.5.29.37
+    // id-kp-clientAuth  = 1.3.6.1.5.5.7.3.2 → OID content bytes (DER, no tag/len):
+    const CLIENT_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02];
+
+    let ext_val = find_extension(cert, &[0x55, 0x1d, 0x25])
+        .ok_or_else(|| crate::error::Error::Bootstrap("missing ExtendedKeyUsage extension".into()))?;
+
+    let mut outer = DerItemIter::new(ext_val);
+    let Some((0x30, seq)) = outer.next() else {
+        return Err(crate::error::Error::Bootstrap("EKU: expected SEQUENCE".into()));
+    };
+    let found = DerItemIter::new(seq).any(|(tag, val)| tag == 0x06 && val == CLIENT_AUTH);
+    if !found {
+        return Err(crate::error::Error::Bootstrap("clientAuth not in ExtendedKeyUsage".into()));
+    }
+    Ok(())
+}
+
+/// Verify the device certificate's signature using the CA's P-256 public key.
+///
+/// All device certificates in this system use ecdsaWithSHA256; SHA-256 is used
+/// unconditionally.
+///
+/// TBS bytes are extracted from the original `cert_der` rather than re-encoded via
+/// `to_der()` to avoid any canonicalization differences (e.g. INTEGER leading-zero
+/// handling) that would break the signature check.
+fn cert_verify_signature(
+    cert: &x509_cert::Certificate,
+    ca: &x509_cert::Certificate,
+    cert_der: &[u8],
+) -> crate::error::Result<()> {
+    use p256::{
+        ecdsa::{signature::Verifier, Signature, VerifyingKey},
+        pkcs8::DecodePublicKey,
+    };
+    use x509_cert::der::Encode;
+
+    let ca_spki_der = ca
+        .tbs_certificate
+        .subject_public_key_info
+        .to_der()
+        .map_err(|e| crate::error::Error::Bootstrap(format!("CA SPKI encode: {e}")))?;
+    let vk = VerifyingKey::from_public_key_der(&ca_spki_der)
+        .map_err(|e| crate::error::Error::Bootstrap(format!("CA public key parse: {e}")))?;
+
+    // Extract TBS bytes directly from the original DER to avoid any re-encoding
+    // differences that would invalidate the signature.
+    let tbs_der = tbs_bytes_from_cert_der(cert_der)
+        .ok_or_else(|| crate::error::Error::Bootstrap("cannot extract TBS from cert DER".into()))?;
+
+    // cert.signature is a BIT STRING; as_bytes() strips the leading unused-bits octet.
+    let sig_bytes = cert
+        .signature
+        .as_bytes()
+        .ok_or_else(|| crate::error::Error::Bootstrap("cert signature not octet-aligned".into()))?;
+    let sig = Signature::from_der(sig_bytes)
+        .map_err(|e| crate::error::Error::Bootstrap(format!("signature parse: {e}")))?;
+
+    vk.verify(tbs_der, &sig)
+        .map_err(|_| crate::error::Error::Bootstrap("signature verification failed".into()))
+}
+
+/// Extract the raw DER bytes of the TBSCertificate (the first SEQUENCE inside the
+/// outer Certificate SEQUENCE) without re-encoding.
+fn tbs_bytes_from_cert_der(cert_der: &[u8]) -> Option<&[u8]> {
+    // Certificate SEQUENCE content = TBSCertificate || AlgorithmIdentifier || Signature
+    let mut outer = DerItemIter::new(cert_der);
+    let (0x30, cert_content) = outer.next()? else {
+        return None;
+    };
+    // Consume the first item (TBS SEQUENCE) and note how many bytes it occupied.
+    let mut inner = DerItemIter::new(cert_content);
+    inner.next()?;
+    Some(&cert_content[..inner.pos])
+}
+
+/// Check that the SubjectAltName extension contains a URI starting with "sgtin:".
+fn cert_check_sgtin(cert: &x509_cert::Certificate) -> crate::error::Result<()> {
+    // id-ce-subjectAltName = 2.5.29.17
+    // URI GeneralName has tag 0x86 (context [6], implicit, primitive).
+    let ext_val = find_extension(cert, &[0x55, 0x1d, 0x11])
+        .ok_or_else(|| crate::error::Error::Bootstrap("missing SubjectAltName extension".into()))?;
+
+    let mut outer = DerItemIter::new(ext_val);
+    let Some((0x30, seq)) = outer.next() else {
+        return Err(crate::error::Error::Bootstrap("SAN: expected SEQUENCE".into()));
+    };
+    let found = DerItemIter::new(seq)
+        .any(|(tag, val)| tag == 0x86 && val.starts_with(b"sgtin:"));
+    if !found {
+        return Err(crate::error::Error::Bootstrap("no sgtin: URI in SubjectAltName".into()));
+    }
+    Ok(())
+}
+
+/// Return the raw value bytes (OctetString content) of the first extension whose
+/// OID matches the given encoded OID bytes (DER content, without tag and length).
+fn find_extension<'a>(
+    cert: &'a x509_cert::Certificate,
+    oid_content: &[u8],
+) -> Option<&'a [u8]> {
+    let exts = cert.tbs_certificate.extensions.as_deref()?;
+    exts.iter().find_map(|e| {
+        // e.extn_id is an ObjectIdentifier; its DER encoding is 06 <len> <oid_content>.
+        // We compare the raw arc bytes directly.
+        if e.extn_id.as_bytes() == oid_content {
+            Some(e.extn_value.as_bytes())
+        } else {
+            None
+        }
+    })
+}
+
+/// Minimal DER TLV iterator — yields `(tag, value_bytes)` pairs without recursing.
+struct DerItemIter<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> DerItemIter<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+}
+
+impl<'a> Iterator for DerItemIter<'a> {
+    type Item = (u8, &'a [u8]);
+
+    fn next(&mut self) -> Option<(u8, &'a [u8])> {
+        if self.pos + 1 >= self.data.len() {
+            return None;
+        }
+        let tag = self.data[self.pos];
+        self.pos += 1;
+
+        let first = self.data[self.pos];
+        self.pos += 1;
+        let len = if first < 0x80 {
+            first as usize
+        } else {
+            let n = (first & 0x7f) as usize;
+            if n == 0 || n > 4 || self.pos + n > self.data.len() {
+                return None;
+            }
+            let mut l = 0usize;
+            for _ in 0..n {
+                l = (l << 8) | (self.data[self.pos] as usize);
+                self.pos += 1;
+            }
+            l
+        };
+
+        let end = self.pos + len;
+        if end > self.data.len() {
+            return None;
+        }
+        let value = &self.data[self.pos..end];
+        self.pos = end;
+        Some((tag, value))
+    }
 }
 
 // ── CBOR encoding ─────────────────────────────────────────────────────────────
@@ -713,5 +989,41 @@ mod tests {
     #[test]
     fn encrypt_network_key_dmd_live_device_round_trip() {
         assert_encrypt_round_trip(DMD_CERT_DER_HEX, DMD_PRIV_SCALAR_HEX);
+    }
+
+    // ── Certificate validation ────────────────────────────────────────────────
+
+    // The DK cert (2022-05-19) predates CA1 (2022-06-29) and was signed by an
+    // earlier smartsystem key.  Issuer name matches CA1, but signature does not.
+    #[test]
+    fn validate_rejects_dk_cert_signed_by_old_ca() {
+        let cert_der = from_hex(DK_CERT_DER_HEX);
+        let err = validate_device_certificate(&cert_der)
+            .expect_err("DK cert signed by old CA should be rejected");
+        assert!(
+            err.to_string().contains("signature"),
+            "expected signature error, got: {err}"
+        );
+    }
+
+    // The DMD cert (2024-09-05) is signed by CA2 (GARDENA Device CA G1).
+    #[test]
+    fn validate_dmd_live_device_certificate() {
+        let cert_der = from_hex(DMD_CERT_DER_HEX);
+        validate_device_certificate(&cert_der).expect("DMD cert should be valid");
+    }
+
+    // Corrupt the issuer string inside the DK cert so it no longer matches any CA.
+    // Offset 57 is the first byte of the CN value "smartsystem" inside the issuer.
+    #[test]
+    fn validate_rejects_unknown_issuer() {
+        let mut cert_der = from_hex(DK_CERT_DER_HEX);
+        cert_der[57] ^= 0xff; // turn 's' into something else
+        let err = validate_device_certificate(&cert_der)
+            .expect_err("tampered issuer should be rejected");
+        assert!(
+            err.to_string().contains("issuer"),
+            "expected unknown-issuer error, got: {err}"
+        );
     }
 }

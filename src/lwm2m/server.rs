@@ -404,15 +404,30 @@ async fn handle_ack(
         return Ok(());
     }
 
-    // Bootstrap GET /0/0 ACK — cache the cert; write phase is triggered on the next /bs.
+    // Bootstrap GET /0/0 ACK — validate cert, cache on success; write phase triggered on next /bs.
     if bootstrap_registry.is_pending(&token).await {
         if let Some(session) = bootstrap_registry.complete(&token, packet.payload.clone()).await {
-            info!(
-                device = %session.endpoint,
-                bytes = session.pubkey_payload.as_ref().map_or(0, |p| p.len()),
-                activity = "inclusion",
-                "Device available for inclusion"
-            );
+            let payload = session.pubkey_payload.as_deref().unwrap_or(&[]);
+            let valid = bootstrap::parse_device_pubkey(payload)
+                .and_then(|cert_der| bootstrap::validate_device_certificate(&cert_der));
+            match valid {
+                Ok(()) => {
+                    info!(
+                        device = %session.endpoint,
+                        bytes = payload.len(),
+                        activity = "inclusion",
+                        "Device available for inclusion"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        device = %session.endpoint,
+                        activity = "inclusion",
+                        "Device certificate rejected: {e}"
+                    );
+                    bootstrap_registry.remove_from_cert_cache(&session.endpoint).await;
+                }
+            }
         }
         return Ok(());
     }
