@@ -610,7 +610,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9106e1d747ffd48e6be5bb2d97fa706ed25b144fbee4d5c02eae110cd8d6badd"
 
 [[package]]
-name = "lwm2m-gateway"
+name = "lwm2mserver-rs"
 version = "0.1.0"
 dependencies = [
  "aes",
