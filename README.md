@@ -48,11 +48,10 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 
 OS, BusyBox, and radio interface (`ppp0` — IPv6-only PPP over `/dev/ttyS1` at 500 000 baud) are identical on both gateways.
 
-| Property | GARDENA smart Gateway | LCGW / MT7688 |
+| Property | smart Gateway 19000 | smart Gateway 19005 |
 |---|---|---|
 | CPU | ARMv5TE (`armv5tejl`) | MediaTek MT7688 — MIPS 24KEc V5.5, MIPS32r2 |
 | C library ABI | hard-float | soft-float — glibc, libpthread, libm, libdl all compiled `-msoft-float` |
-| Gateway IPv6 | `fc00::6:100:0:0/64` (ULA) + `fe80::…` link-local | — |
 | Rust target | `armv5te-unknown-linux-gnueabi` | `mipsel-unknown-linux-gnu` |
 | Build script | `./build-arm.sh` | `./build-mips.sh` |
 
@@ -107,7 +106,7 @@ Both scripts accept an optional `root@<ip>` argument to deploy immediately after
 ./build-mips.sh [root@192.168.1.x]  # LCGW / MT7688 (MIPS)
 ```
 
-The MIPS script additionally patches two ELF fields that encode the float ABI after linking (see [MIPS cross-compilation notes](#mips-cross-compilation-notes)). Deployment uses `scp -O` (legacy SCP protocol — required because the gateway's BusyBox SSH has no SFTP server).
+The MIPS script additionally patches two ELF fields that encode the float ABI after linking (see [MIPS cross-compilation notes](#mips-cross-compilation-notes)).
 
 ### Release profile
 
