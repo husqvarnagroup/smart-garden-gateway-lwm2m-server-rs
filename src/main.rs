@@ -8,7 +8,7 @@ use tracing_subscriber::{Layer as _, util::SubscriberInitExt as _, prelude::__tr
 use std::sync::Arc;
 
 use lwm2mserver_rs::{
-    lwm2m::{self, bootstrap::BootstrapRegistry, ipso::IpsoModel, server::DispatchRequest},
+    lwm2m::{self, bootstrap::BootstrapRegistry, ipso::{IpsoModel, load_shared}, server::DispatchRequest},
     config::Config,
     housekeeping,
     ipc::{command, event},
@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Config::from_args().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let ipso = Arc::new(IpsoModel::load_dirs(&cfg.ipso_directories));
+    let ipso = load_shared(&cfg.ipso_directories);
     let registry = DeviceRegistry::new();
     let bootstrap_registry = BootstrapRegistry::new(cfg.network_key.clone(), Some(cfg.server_uri.clone()));
     let bootstrap_registry_hk = bootstrap_registry.clone();
@@ -104,6 +104,21 @@ async fn main() -> anyhow::Result<()> {
             let _ = tokio::signal::ctrl_c().await;
             info!("Shutdown signal received");
             cancel.cancel();
+        });
+    }
+
+    #[cfg(unix)]
+    {
+        let ipso = ipso.clone();
+        let dirs = cfg.ipso_directories.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sighup = signal(SignalKind::hangup()).expect("SIGHUP handler");
+            while sighup.recv().await.is_some() {
+                info!("SIGHUP received, reloading IPSO definitions");
+                let new_model = std::sync::Arc::new(IpsoModel::load_dirs(&dirs));
+                *ipso.write().unwrap() = new_model;
+            }
         });
     }
 

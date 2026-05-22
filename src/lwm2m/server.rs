@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use crate::{
     lwm2m::{
         bootstrap::{self, BootstrapRegistry},
-        ipso::IpsoModel,
+        ipso::{IpsoModel, SharedIpso},
     },
     error::Result,
     ipc::event::EventSender,
@@ -36,7 +36,7 @@ pub async fn run(
     bootstrap_registry: BootstrapRegistry,
     coap_dispatch_tx: mpsc::Sender<DispatchRequest>,
     event_sender: EventSender,
-    ipso: Arc<IpsoModel>,
+    ipso: SharedIpso,
     persistence: Arc<PersistenceStore>,
     block_acks: BlockAckMap,
     cancel: CancellationToken,
@@ -86,7 +86,7 @@ struct ServerCtx<'a> {
     bootstrap_registry: &'a BootstrapRegistry,
     coap_dispatch_tx: &'a mpsc::Sender<DispatchRequest>,
     event_sender: &'a EventSender,
-    ipso: &'a Arc<IpsoModel>,
+    ipso: &'a SharedIpso,
     persistence: &'a Arc<PersistenceStore>,
     block_acks: &'a BlockAckMap,
 }
@@ -157,7 +157,8 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
         }
         // POST /dp  — device data push (SenML+CBOR state report after registration)
         [p] if *p == DP_PATH => {
-            handle_dp(packet, addr, ctx.socket, ctx.registry, ctx.event_sender, ctx.ipso, ctx.persistence).await?;
+            let ipso = ctx.ipso.read().unwrap().clone();
+            handle_dp(packet, addr, ctx.socket, ctx.registry, ctx.event_sender, &*ipso, ctx.persistence).await?;
         }
         _ => {
             warn!(%addr, path, "POST to unknown path");

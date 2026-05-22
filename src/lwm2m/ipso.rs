@@ -1,5 +1,14 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, sync::{Arc, RwLock}};
 use tracing::{info, warn};
+
+/// A shared, hot-reloadable IPSO model. Inner `Arc<IpsoModel>` is swapped
+/// atomically on SIGHUP; the write lock is held only during the swap.
+pub type SharedIpso = Arc<RwLock<Arc<IpsoModel>>>;
+
+/// Construct a freshly loaded [`SharedIpso`] from the given directories.
+pub fn load_shared(dirs: &[impl AsRef<Path>]) -> SharedIpso {
+    Arc::new(RwLock::new(Arc::new(IpsoModel::load_dirs(dirs))))
+}
 
 // ── Public types ──────────────────────────────────────────────────────────────
 

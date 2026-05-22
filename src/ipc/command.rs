@@ -1,9 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU32, Ordering},
     time::{Duration, Instant},
 };
 
@@ -16,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    lwm2m::{bootstrap::BootstrapRegistry, ipso::IpsoModel, server::DispatchRequest},
+    lwm2m::{bootstrap::BootstrapRegistry, ipso::SharedIpso, server::DispatchRequest},
     error::Result,
     model::{LwM2mCommand, PendingOperation, ResourcePath, ResourceValue},
     registry::DeviceRegistry,
@@ -30,7 +27,7 @@ static NEXT_OP_ID: AtomicU32 = AtomicU32::new(1);
 struct IpcCtx {
     bootstrap_registry: BootstrapRegistry,
     registry: DeviceRegistry,
-    ipso: Arc<IpsoModel>,
+    ipso: SharedIpso,
     dispatch_tx: mpsc::Sender<DispatchRequest>,
 }
 
@@ -38,7 +35,7 @@ pub async fn run(
     path: PathBuf,
     bootstrap_registry: BootstrapRegistry,
     registry: DeviceRegistry,
-    ipso: Arc<IpsoModel>,
+    ipso: SharedIpso,
     dispatch_tx: mpsc::Sender<DispatchRequest>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -195,7 +192,8 @@ async fn resolve_resource(path: &str, device: &str, op: &str, ctx: &IpcCtx) -> O
         }
     };
 
-    let Some(obj_id) = ctx.ipso.object_id_by_name(obj_name) else {
+    let ipso = ctx.ipso.read().unwrap().clone();
+    let Some(obj_id) = ipso.object_id_by_name(obj_name) else {
         warn!(path, obj_name, "IPC {op}: unknown object name");
         return None;
     };
@@ -206,7 +204,7 @@ async fn resolve_resource(path: &str, device: &str, op: &str, ctx: &IpcCtx) -> O
     };
 
     let ver = versions.get(&obj_id).map(String::as_str);
-    let Some(res_id) = ctx.ipso.resource_id_by_name(obj_id, res_name, ver) else {
+    let Some(res_id) = ipso.resource_id_by_name(obj_id, res_name, ver) else {
         warn!(path, res_name, "IPC {op}: unknown resource name");
         return None;
     };

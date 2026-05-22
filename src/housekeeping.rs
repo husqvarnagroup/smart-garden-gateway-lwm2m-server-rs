@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU32, Ordering},
     time::{Duration, Instant},
 };
 
@@ -11,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    lwm2m::{bootstrap::BootstrapRegistry, ipso::IpsoModel, server::DispatchRequest},
+    lwm2m::{bootstrap::BootstrapRegistry, ipso::{IpsoModel, SharedIpso}, server::DispatchRequest},
     error::Result,
     model::{LwM2mCommand, PendingOperation, ResourcePath},
     registry::DeviceRegistry,
@@ -34,14 +31,9 @@ pub async fn run(
     registry: DeviceRegistry,
     bootstrap_registry: BootstrapRegistry,
     dispatch_tx: mpsc::Sender<DispatchRequest>,
-    ipso: Arc<IpsoModel>,
+    ipso: SharedIpso,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let ping_path = resolve_ping_path(&ipso);
-    if ping_path.is_none() {
-        warn!("Connectivity ping disabled: could not resolve sg_common/0/measure_rf_link in IPSO model");
-    }
-
     let mut interval = time::interval(Duration::from_secs(INTERVAL_SECS));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
@@ -60,6 +52,7 @@ pub async fn run(
                 registry.timeout_in_flight(IN_FLIGHT_TIMEOUT_SECS).await;
                 bootstrap_registry.expire_stale(BOOTSTRAP_TIMEOUT_SECS).await;
 
+                let ping_path = resolve_ping_path(&*ipso.read().unwrap());
                 if let Some(ref path) = ping_path {
                     let candidates = registry
                         .take_ping_candidates(
