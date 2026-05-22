@@ -11,6 +11,7 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 
 ## Table of contents
 
+- [Open issues](#open-issues)
 - [Target hardware](#target-hardware)
 - [Development setup](#development-setup-one-time)
 - [Build](#build)
@@ -32,6 +33,15 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 - [IPSO object definitions](#ipso-object-definitions)
 - [Persistence](#persistence)
 - [Project layout](#project-layout)
+
+---
+
+## Open issues
+
+- **IPC socket reconnection** — clients connecting to the command or event socket after a service restart must reconnect manually; the sockets are recreated on startup but there is no reconnection or keep-alive mechanism on the service side.
+- **Firmware update support** — OTA firmware update via LWM2M Firmware Update object (object 5) is not yet implemented.
+- **Mower compatibility** — protocol or object-model differences for mower devices have not been validated; compatibility work is pending.
+- **Cross-compilation to LCGW** — the build currently targets the GARDENA smart Gateway (ARMv5TE); cross-compilation and deployment to the LCGW platform has not been set up yet.
 
 ---
 
