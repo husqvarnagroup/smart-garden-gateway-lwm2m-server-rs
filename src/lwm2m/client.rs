@@ -136,10 +136,7 @@ async fn dispatch_op(
             set_tclass(&socket, TC_ENCRYPTED);
             if let Err(e) = socket.send_to(&bytes, addr).await {
                 warn!(%addr, "Failed to send: {e}");
-                if let Some(endpoint) = registry.set_device_offline(addr).await {
-                    info!(device = %endpoint, activity = "connection-status", "Device is offline");
-                    event_sender.send_connection_status(&endpoint, false);
-                }
+                mark_device_offline(&registry, addr, &event_sender).await;
                 break;
             }
             debug!(%addr, attempt = attempts + 1, coap = %coap_msg, "CoAP tx");
@@ -159,10 +156,7 @@ async fn dispatch_op(
                     warn!(%addr, op_id = op.id, "Device unreachable, operation timed out");
                     let _ = op.response_tx.send(Err(LwM2mError::Timeout));
                 }
-                if let Some(endpoint) = registry.set_device_offline(addr).await {
-                    info!(device = %endpoint, activity = "connection-status", "Device is offline");
-                    event_sender.send_connection_status(&endpoint, false);
-                }
+                mark_device_offline(&registry, addr, &event_sender).await;
                 return;
             }
 
@@ -255,10 +249,7 @@ async fn dispatch_block_write(
             if socket.send_to(&pkt_bytes, addr).await.is_err() {
                 block_acks.lock().await.remove(&token);
                 let _ = response_tx.send(Err(LwM2mError::Timeout));
-                if let Some(endpoint) = registry.set_device_offline(addr).await {
-                    info!(device = %endpoint, activity = "connection-status", "Device is offline");
-                    event_sender.send_connection_status(&endpoint, false);
-                }
+                mark_device_offline(&registry, addr, &event_sender).await;
                 return;
             }
             debug!(%addr, op_id, block_num, more, szx, bytes = chunk.len(), "CoAP tx Block1 PUT");
@@ -280,10 +271,7 @@ async fn dispatch_block_write(
                     if retransmits >= MAX_RETRANSMIT {
                         warn!(%addr, op_id, block_num, "Block write timed out");
                         let _ = response_tx.send(Err(LwM2mError::Timeout));
-                        if let Some(endpoint) = registry.set_device_offline(addr).await {
-                            info!(device = %endpoint, activity = "connection-status", "Device is offline");
-                            event_sender.send_connection_status(&endpoint, false);
-                        }
+                        mark_device_offline(&registry, addr, &event_sender).await;
                         return;
                     }
                     timeout_ms *= 2;
@@ -304,7 +292,10 @@ async fn dispatch_block_write(
                 }
                 // Signal the FOTA handler that the transfer has started.
                 if let Some(tx) = first_ack_tx.take() {
-                    let _ = tx.send(Ok(ResourceValue::CoapResponse { class: 2, detail: 31 }));
+                    let _ = tx.send(Ok(ResourceValue::CoapResponse {
+                        class: 2,
+                        detail: 31,
+                    }));
                 }
                 // Honor device's SZX negotiation (RFC 7959 §2.5).
                 if let Some(dev_szx) = block1_szx_from_response(&ack_pkt) {
@@ -360,7 +351,7 @@ fn build_request(command: &LwM2mCommand, token: [u8; 8], mid: u16) -> Result<Pac
             add_uri_path(&mut packet, &path.as_uri_path());
             packet.add_option(
                 CoapOption::ContentFormat,
-                content_format.to_be_bytes().to_vec(),
+                super::encode_content_format(*content_format),
             );
             packet.payload = value.clone();
         }
@@ -378,6 +369,17 @@ fn build_request(command: &LwM2mCommand, token: [u8; 8], mid: u16) -> Result<Pac
 fn add_uri_path(packet: &mut Packet, path: &str) {
     for segment in path.split('/') {
         packet.add_option(CoapOption::UriPath, segment.as_bytes().to_vec());
+    }
+}
+
+async fn mark_device_offline(
+    registry: &DeviceRegistry,
+    addr: SocketAddr,
+    event_sender: &EventSender,
+) {
+    if let Some(endpoint) = registry.set_device_offline(addr).await {
+        info!(device = %endpoint, activity = "connection-status", "Device is offline");
+        event_sender.send_connection_status(&endpoint, false);
     }
 }
 
@@ -425,7 +427,7 @@ fn build_block_put(
     add_uri_path(&mut packet, uri_path);
     packet.add_option(
         CoapOption::ContentFormat,
-        content_format.to_be_bytes().to_vec(),
+        super::encode_content_format(content_format),
     );
     packet.add_option(CoapOption::Block1, block1.to_vec());
     packet.payload = chunk.to_vec();

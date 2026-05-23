@@ -180,6 +180,16 @@ pub mod content_format {
     pub const SENML_CBOR: u16 = 112;
 }
 
+/// Encode a CoAP Content-Format option value using the minimum number of bytes
+/// (RFC 7252 §3.2: option values are compact unsigned integers).
+pub(super) fn encode_content_format(cf: u16) -> Vec<u8> {
+    if cf <= 0xFF {
+        vec![cf as u8]
+    } else {
+        cf.to_be_bytes().to_vec()
+    }
+}
+
 /// Extract the bare SGTIN from a CoAP `ep` parameter that may carry a full URN.
 ///
 /// `urn:dev:sg:3034F8319C00754000000097` → `3034F8319C00754000000097`

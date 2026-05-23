@@ -4,7 +4,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use tokio::{
@@ -19,12 +19,12 @@ use crate::{
     error::Result,
     ipc::event::EventSender,
     lwm2m::{
-        bootstrap::BootstrapRegistry,
-        client::BLOCK_THRESHOLD,
-        ipso::SharedIpso,
+        bootstrap::BootstrapRegistry, client::BLOCK_THRESHOLD, ipso::SharedIpso,
         server::DispatchRequest,
     },
-    model::{LwM2mCommand, PendingOperation, ResourcePath, ResourceValue},
+    model::{
+        LwM2mCommand, PendingOperation, ResourcePath, ResourceValue, FACTORY_RESET_PATH, FOTA_PATH,
+    },
     persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
@@ -264,14 +264,11 @@ async fn dispatch_and_await(
     ctx: &IpcCtx,
 ) -> serde_json::Value {
     let (response_tx, response_rx) = oneshot::channel();
-    let op = PendingOperation {
-        id: NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
+    let op = PendingOperation::new(
+        NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
         command,
         response_tx,
-        first_ack_tx: None,
-        created_at: Instant::now(),
-        attempts: 0,
-    };
+    );
 
     if ctx
         .dispatch_tx
@@ -380,21 +377,14 @@ async fn handle_exclusion(device: &str, ctx: &IpcCtx) -> serde_json::Value {
         None => Some("device_not_connected"),
         Some(addr) => {
             let (response_tx, response_rx) = oneshot::channel();
-            let op = PendingOperation {
-                id: NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
-                command: LwM2mCommand::Execute {
-                    path: ResourcePath {
-                        object_id: 3,
-                        instance_id: 0,
-                        resource_id: 5,
-                    },
+            let op = PendingOperation::new(
+                NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
+                LwM2mCommand::Execute {
+                    path: FACTORY_RESET_PATH,
                     args: None,
                 },
                 response_tx,
-                first_ack_tx: None,
-                created_at: Instant::now(),
-                attempts: 0,
-            };
+            );
 
             let sent = ctx
                 .dispatch_tx
@@ -439,7 +429,10 @@ async fn handle_exclusion(device: &str, ctx: &IpcCtx) -> serde_json::Value {
 
     let mut meta = serde_json::Map::new();
     if let Some(tag) = exclusion_tag {
-        meta.insert("exclusion".into(), serde_json::Value::String(tag.to_owned()));
+        meta.insert(
+            "exclusion".into(),
+            serde_json::Value::String(tag.to_owned()),
+        );
     }
     serde_json::json!({"metadata": meta, "success": true})
 }
@@ -458,13 +451,64 @@ fn execute_args(payload: &serde_json::Value) -> Option<Vec<u8>> {
     arr[0].as_str().map(|s| s.as_bytes().to_vec())
 }
 
+/// Send a single (non-block-wise) Write to the firmware_update/0/package resource.
+/// Used for both the flush byte (`[0x00]`) and small payloads.
+async fn send_fota_single(
+    addr: std::net::SocketAddr,
+    dev_id: crate::model::DeviceId,
+    bytes: Vec<u8>,
+    lock_guard: tokio::sync::OwnedMutexGuard<()>,
+    ctx: &IpcCtx,
+) -> serde_json::Value {
+    let (response_tx, response_rx) = oneshot::channel();
+    let op = PendingOperation::new(
+        NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
+        LwM2mCommand::Write {
+            path: FOTA_PATH,
+            value: bytes,
+            content_format: 42,
+        },
+        response_tx,
+    );
+    if ctx
+        .dispatch_tx
+        .send(DispatchRequest {
+            addr,
+            ops: vec![op],
+        })
+        .await
+        .is_err()
+    {
+        return serde_json::json!({"success": false});
+    }
+    let result = match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
+        Ok(Ok(Ok(ResourceValue::CoapResponse { class: 2, detail }))) => {
+            serde_json::json!({
+                "metadata": {
+                    "lwm2m_client_id": dev_id,
+                    "lwm2m_uri": [5, 0, 0],
+                    "lwm2m_response_code": (2u16 * 32 + detail as u16)
+                },
+                "success": true
+            })
+        }
+        _ => serde_json::json!({"success": false}),
+    };
+    drop(lock_guard);
+    result
+}
+
 async fn handle_fota_write(
     device: &str,
     write_payload: &serde_json::Value,
     ctx: &IpcCtx,
 ) -> serde_json::Value {
     let Some((addr, dev_id, _)) = ctx.registry.addr_and_id_by_endpoint(device).await else {
-        warn!(device, activity = "fota", "Firmware upload failed: device not connected");
+        warn!(
+            device,
+            activity = "fota",
+            "Firmware upload failed: device not connected"
+        );
         return serde_json::json!({"success": false});
     };
 
@@ -474,13 +518,21 @@ async fn handle_fota_write(
             match STANDARD.decode(s) {
                 Ok(b) => b,
                 Err(_) => {
-                    warn!(device, activity = "fota", "Firmware upload failed: invalid firmware data");
+                    warn!(
+                        device,
+                        activity = "fota",
+                        "Firmware upload failed: invalid firmware data"
+                    );
                     return serde_json::json!({"success": false});
                 }
             }
         }
         None => {
-            warn!(device, activity = "fota", "Firmware upload failed: firmware data missing from request");
+            warn!(
+                device,
+                activity = "fota",
+                "Firmware upload failed: firmware data missing from request"
+            );
             return serde_json::json!({"success": false});
         }
     };
@@ -488,110 +540,49 @@ async fn handle_fota_write(
     let lock_guard = match Arc::clone(&ctx.fota_lock).try_lock_owned() {
         Ok(g) => g,
         Err(_) => {
-            info!(device, activity = "fota", "Firmware upload rejected: another upload already in progress");
+            info!(
+                device,
+                activity = "fota",
+                "Firmware upload rejected: another upload already in progress"
+            );
             return serde_json::json!({"success": false});
         }
-    };
-
-    let fota_path = ResourcePath {
-        object_id: 5,
-        instance_id: 0,
-        resource_id: 0,
     };
 
     if bytes.as_slice() == [0x00] {
-        info!(device, activity = "fota", "Firmware upload: flush received, ready for new upload");
-        let (response_tx, response_rx) = oneshot::channel();
-        let op = PendingOperation {
-            id: NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
-            command: LwM2mCommand::Write {
-                path: fota_path,
-                value: bytes,
-                content_format: 42,
-            },
-            response_tx,
-            first_ack_tx: None,
-            created_at: Instant::now(),
-            attempts: 0,
-        };
-        let op_id = op.id;
-        if ctx
-            .dispatch_tx
-            .send(DispatchRequest {
-                addr,
-                ops: vec![op],
-            })
-            .await
-            .is_err()
-        {
-            return serde_json::json!({"success": false});
-        }
-        let result = match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
-            Ok(Ok(Ok(ResourceValue::CoapResponse { class: 2, detail }))) => {
-                serde_json::json!({"metadata": {"lwm2m_client_id": dev_id, "lwm2m_uri": [5, 0, 0], "lwm2m_response_code": (2u16 * 32 + detail as u16)}, "success": true})
-            }
-            _ => serde_json::json!({"success": false}),
-        };
-        drop(lock_guard);
-        let _ = op_id; // suppress unused warning
-        return result;
+        info!(
+            device,
+            activity = "fota",
+            "Firmware upload: flush received, ready for new upload"
+        );
+        return send_fota_single(addr, dev_id, bytes, lock_guard, ctx).await;
     }
 
-    info!(device, bytes = bytes.len(), activity = "fota", "Firmware upload starting");
+    info!(
+        device,
+        bytes = bytes.len(),
+        activity = "fota",
+        "Firmware upload starting"
+    );
 
     if bytes.len() <= BLOCK_THRESHOLD {
-        let (response_tx, response_rx) = oneshot::channel();
-        let op = PendingOperation {
-            id: NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
-            command: LwM2mCommand::Write {
-                path: fota_path,
-                value: bytes,
-                content_format: 42,
-            },
-            response_tx,
-            first_ack_tx: None,
-            created_at: Instant::now(),
-            attempts: 0,
-        };
-        let op_id = op.id;
-        if ctx
-            .dispatch_tx
-            .send(DispatchRequest {
-                addr,
-                ops: vec![op],
-            })
-            .await
-            .is_err()
-        {
-            return serde_json::json!({"success": false});
-        }
-        let result = match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
-            Ok(Ok(Ok(ResourceValue::CoapResponse { class: 2, detail }))) => {
-                serde_json::json!({"metadata": {"lwm2m_client_id": dev_id, "lwm2m_uri": [5, 0, 0], "lwm2m_response_code": (2u16 * 32 + detail as u16)}, "success": true})
-            }
-            _ => serde_json::json!({"success": false}),
-        };
-        drop(lock_guard);
-        let _ = op_id;
-        return result;
+        return send_fota_single(addr, dev_id, bytes, lock_guard, ctx).await;
     }
 
     // Multi-block path: return after first Continue, finish in background.
     let op_id = NEXT_OP_ID.fetch_add(1, Ordering::Relaxed);
     let (response_tx, response_rx) = oneshot::channel();
     let (first_ack_tx, first_ack_rx) = oneshot::channel();
-    let op = PendingOperation {
-        id: op_id,
-        command: LwM2mCommand::Write {
-            path: fota_path,
+    let mut op = PendingOperation::new(
+        op_id,
+        LwM2mCommand::Write {
+            path: FOTA_PATH,
             value: bytes,
             content_format: 42,
         },
         response_tx,
-        first_ack_tx: Some(first_ack_tx),
-        created_at: Instant::now(),
-        attempts: 0,
-    };
+    );
+    op.first_ack_tx = Some(first_ack_tx);
 
     if ctx
         .dispatch_tx
@@ -608,7 +599,11 @@ async fn handle_fota_write(
     match tokio::time::timeout(Duration::from_secs(30), first_ack_rx).await {
         Ok(Ok(Ok(_))) => {}
         _ => {
-            warn!(device, activity = "fota", "Firmware upload failed: device did not respond");
+            warn!(
+                device,
+                activity = "fota",
+                "Firmware upload failed: device did not respond"
+            );
             return serde_json::json!({"success": false});
         }
     }

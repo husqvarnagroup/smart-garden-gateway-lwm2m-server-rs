@@ -1,6 +1,6 @@
 use std::{
     sync::atomic::{AtomicU32, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use tokio::{sync::mpsc, time};
@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::{
     error::Result,
     lwm2m::{bootstrap::BootstrapRegistry, server::DispatchRequest},
-    model::{LwM2mCommand, PendingOperation, ResourcePath},
+    model::{LwM2mCommand, PendingOperation, PING_PATH},
     registry::DeviceRegistry,
 };
 
@@ -26,13 +26,6 @@ const OFFLINE_PING_MAX_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 /// Op-ID counter for housekeeping-originated pings. Uses the upper half of u32
 /// to avoid collisions with IPC-originated op IDs (which start from 1).
 static NEXT_PING_OP_ID: AtomicU32 = AtomicU32::new(0x8000_0000);
-
-/// LWM2M Server object (/1), instance 1, Registration Update Trigger resource (8).
-const PING_PATH: ResourcePath = ResourcePath {
-    object_id: 1,
-    instance_id: 1,
-    resource_id: 8,
-};
 
 pub async fn run(
     registry: DeviceRegistry,
@@ -67,19 +60,15 @@ pub async fn run(
                     .await;
 
                 for (endpoint, addr) in candidates {
-                    let op_id = NEXT_PING_OP_ID.fetch_add(1, Ordering::Relaxed);
                     let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-                    let op = PendingOperation {
-                        id: op_id,
-                        command: LwM2mCommand::Execute {
+                    let op = PendingOperation::new(
+                        NEXT_PING_OP_ID.fetch_add(1, Ordering::Relaxed),
+                        LwM2mCommand::Execute {
                             path: PING_PATH,
                             args: None,
                         },
                         response_tx,
-                        first_ack_tx: None,
-                        created_at: Instant::now(),
-                        attempts: 0,
-                    };
+                    );
                     info!(device = %endpoint, activity = "connection-status", "Sending connectivity ping");
                     let _ = dispatch_tx.send(DispatchRequest { addr, ops: vec![op] }).await;
                 }
@@ -87,4 +76,3 @@ pub async fn run(
         }
     }
 }
-

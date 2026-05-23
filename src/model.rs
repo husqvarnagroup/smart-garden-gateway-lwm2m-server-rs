@@ -83,6 +83,40 @@ pub struct PendingOperation {
     pub attempts: u8,
 }
 
+impl PendingOperation {
+    pub fn new(id: u32, command: LwM2mCommand, response_tx: oneshot::Sender<LwM2mResult>) -> Self {
+        Self {
+            id,
+            command,
+            response_tx,
+            first_ack_tx: None,
+            created_at: Instant::now(),
+            attempts: 0,
+        }
+    }
+}
+
+/// LWM2M Server Object (/1/1/8) — Registration Update Trigger (used as connectivity ping).
+pub const PING_PATH: ResourcePath = ResourcePath {
+    object_id: 1,
+    instance_id: 1,
+    resource_id: 8,
+};
+
+/// LWM2M Device Object (/3/0/5) — Factory Reset.
+pub const FACTORY_RESET_PATH: ResourcePath = ResourcePath {
+    object_id: 3,
+    instance_id: 0,
+    resource_id: 5,
+};
+
+/// LWM2M Firmware Update Object (/5/0/0) — Package (firmware binary).
+pub const FOTA_PATH: ResourcePath = ResourcePath {
+    object_id: 5,
+    instance_id: 0,
+    resource_id: 0,
+};
+
 // ── Device state ─────────────────────────────────────────────────────────────
 
 pub struct Device {

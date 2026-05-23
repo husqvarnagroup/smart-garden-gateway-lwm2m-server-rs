@@ -9,8 +9,8 @@ use tracing::warn;
 use crate::registry::DeviceSnapshot;
 
 pub struct PersistenceStore {
-    pub dir: PathBuf,
-    pub session_to: String,
+    dir: PathBuf,
+    session_to: String,
 }
 
 impl PersistenceStore {

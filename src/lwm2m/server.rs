@@ -24,7 +24,7 @@ use crate::{
         bootstrap::{self, BootstrapRegistry},
         ipso::{IpsoModel, SharedIpso},
     },
-    model::{LwM2mCommand, LwM2mError, PendingOperation, ResourcePath},
+    model::{LwM2mCommand, LwM2mError, PendingOperation, FACTORY_RESET_PATH},
     persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
@@ -452,21 +452,14 @@ async fn handle_registration(
         warn!(device = %endpoint, activity = "registration", "Device not included — triggering factory reset");
 
         let (response_tx, _) = oneshot::channel();
-        let op = PendingOperation {
-            id: INTERNAL_OP_ID.fetch_add(1, Ordering::Relaxed),
-            command: LwM2mCommand::Execute {
-                path: ResourcePath {
-                    object_id: 3,
-                    instance_id: 0,
-                    resource_id: 5,
-                },
+        let op = PendingOperation::new(
+            INTERNAL_OP_ID.fetch_add(1, Ordering::Relaxed),
+            LwM2mCommand::Execute {
+                path: FACTORY_RESET_PATH,
                 args: None,
             },
             response_tx,
-            first_ack_tx: None,
-            created_at: std::time::Instant::now(),
-            attempts: 0,
-        };
+        );
         let _ = coap_dispatch_tx
             .send(DispatchRequest {
                 addr,
@@ -1073,12 +1066,7 @@ fn build_put(mid: u16, token: &[u8], path: &[&str], cf: u16, payload: Vec<u8>) -
     for part in path {
         pkt.add_option(CoapOption::UriPath, part.as_bytes().to_vec());
     }
-    let cf_bytes = if cf <= 0xFF {
-        vec![cf as u8]
-    } else {
-        vec![(cf >> 8) as u8, cf as u8]
-    };
-    pkt.add_option(CoapOption::ContentFormat, cf_bytes);
+    pkt.add_option(CoapOption::ContentFormat, super::encode_content_format(cf));
     pkt.payload = payload;
     pkt.to_bytes()
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))
