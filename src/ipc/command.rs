@@ -1,6 +1,9 @@
 use std::{
     path::PathBuf,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -16,6 +19,7 @@ use crate::{
     error::Result,
     lwm2m::{bootstrap::BootstrapRegistry, ipso::SharedIpso, server::DispatchRequest},
     model::{LwM2mCommand, PendingOperation, ResourcePath, ResourceValue},
+    persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
 
@@ -29,6 +33,7 @@ struct IpcCtx {
     registry: DeviceRegistry,
     ipso: SharedIpso,
     dispatch_tx: mpsc::Sender<DispatchRequest>,
+    persistence: Arc<PersistenceStore>,
 }
 
 pub async fn run(
@@ -37,6 +42,7 @@ pub async fn run(
     registry: DeviceRegistry,
     ipso: SharedIpso,
     dispatch_tx: mpsc::Sender<DispatchRequest>,
+    persistence: Arc<PersistenceStore>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let _ = std::fs::remove_file(&path);
@@ -48,6 +54,7 @@ pub async fn run(
         registry,
         ipso,
         dispatch_tx,
+        persistence,
     };
 
     loop {
@@ -326,6 +333,10 @@ async fn handle_execute_path(
     exec_payload: &serde_json::Value,
     ctx: &IpcCtx,
 ) -> serde_json::Value {
+    if path == "device/0/factory_reset" {
+        return handle_exclusion(device, ctx).await;
+    }
+
     let Some(r) = resolve_resource(path, device, "execute", ctx).await else {
         return serde_json::json!({"success": false});
     };
@@ -339,6 +350,82 @@ async fn handle_execute_path(
         args: execute_args(exec_payload),
     };
     dispatch_and_await(command, &r, "execute", device, path, ctx).await
+}
+
+async fn handle_exclusion(device: &str, ctx: &IpcCtx) -> serde_json::Value {
+    use std::net::SocketAddr;
+
+    let addr_opt: Option<SocketAddr> = ctx
+        .registry
+        .addr_and_id_by_endpoint(device)
+        .await
+        .map(|(addr, _, _)| addr);
+
+    let exclusion_tag: Option<&str> = match addr_opt {
+        None => Some("device_not_connected"),
+        Some(addr) => {
+            let (response_tx, response_rx) = oneshot::channel();
+            let op = PendingOperation {
+                id: NEXT_OP_ID.fetch_add(1, Ordering::Relaxed),
+                command: LwM2mCommand::Execute {
+                    path: ResourcePath {
+                        object_id: 3,
+                        instance_id: 0,
+                        resource_id: 5,
+                    },
+                    args: None,
+                },
+                response_tx,
+                created_at: Instant::now(),
+                attempts: 0,
+            };
+
+            let sent = ctx
+                .dispatch_tx
+                .send(DispatchRequest {
+                    addr,
+                    ops: vec![op],
+                })
+                .await
+                .is_ok();
+
+            if sent {
+                match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
+                    Ok(Ok(Ok(ResourceValue::CoapResponse { class: 2, .. }))) => None,
+                    Err(_) => Some("device_timeout"),
+                    _ => Some("device_failure"),
+                }
+            } else {
+                Some("device_failure")
+            }
+        }
+    };
+
+    ctx.bootstrap_registry.unmark_included(device).await;
+    if let Some(addr) = addr_opt {
+        ctx.registry.remove_by_addr(addr).await;
+    }
+
+    let included = ctx.bootstrap_registry.included_list().await;
+    let snapshots = ctx.registry.snapshot().await;
+    let ps = Arc::clone(&ctx.persistence);
+    let ep = device.to_owned();
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            ps.save_included(&included);
+            ps.delete_device_state(&ep);
+            ps.save_registry(&snapshots);
+        })
+        .await;
+    });
+
+    info!(device, activity = "exclusion", "Device excluded");
+
+    let mut meta = serde_json::Map::new();
+    if let Some(tag) = exclusion_tag {
+        meta.insert("exclusion".into(), serde_json::Value::String(tag.to_owned()));
+    }
+    serde_json::json!({"metadata": meta, "success": true})
 }
 
 fn execute_args(payload: &serde_json::Value) -> Option<Vec<u8>> {

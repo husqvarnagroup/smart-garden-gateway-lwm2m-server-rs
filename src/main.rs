@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
     let (coap_dispatch_tx, coap_dispatch_rx) = mpsc::channel::<DispatchRequest>(256);
     let coap_dispatch_tx_ipc = coap_dispatch_tx.clone();
     let coap_dispatch_tx_hk = coap_dispatch_tx.clone();
+    let persistence_ipc = Arc::clone(&persistence);
     let block_acks = lwm2m::new_block_ack_map();
 
     {
@@ -172,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
             registry,
             ipso,
             coap_dispatch_tx_ipc,
+            persistence_ipc,
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("ipc: {e}"))? }
 
