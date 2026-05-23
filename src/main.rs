@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use sd_notify::NotifyState;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -116,7 +117,22 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             info!("Shutdown signal received");
+            let _ = sd_notify::notify(&[NotifyState::Stopping]);
             cancel.cancel();
+        });
+    }
+
+    #[cfg(unix)]
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+            if sigterm.recv().await.is_some() {
+                info!("Shutdown signal received");
+                let _ = sd_notify::notify(&[NotifyState::Stopping]);
+                cancel.cancel();
+            }
         });
     }
 
@@ -131,6 +147,23 @@ async fn main() -> anyhow::Result<()> {
                 info!("SIGHUP received, reloading IPSO definitions");
                 let new_model = std::sync::Arc::new(IpsoModel::load_dirs(&dirs));
                 *ipso.write().unwrap() = new_model;
+            }
+        });
+    }
+
+    let _ = sd_notify::notify(&[NotifyState::Ready]);
+
+    if let Some(interval) = sd_notify::watchdog_enabled() {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval / 2);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let _ = sd_notify::notify(&[NotifyState::Watchdog]);
+                    }
+                    _ = cancel.cancelled() => break,
+                }
             }
         });
     }

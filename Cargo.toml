@@ -30,6 +30,7 @@ rand_core      = { version = "0.6", features = ["getrandom"] }
 ciborium       = "0.2"
 quick-xml      = "0.36"
 base64         = "0.22"
+sd-notify = "0.5.0"
 
 [profile.release]
 opt-level     = "z"
