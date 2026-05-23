@@ -86,7 +86,6 @@ impl TestGateway {
             registry.clone(),
             bootstrap_registry.clone(),
             dispatch_tx_hk,
-            ipso.clone(),
             cancel.clone(),
         ));
         tokio::spawn(command::run(

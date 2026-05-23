@@ -163,7 +163,6 @@ async fn main() -> anyhow::Result<()> {
             registry.clone(),
             bootstrap_registry_hk,
             coap_dispatch_tx_hk,
-            ipso.clone(),
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("housekeeping: {e}"))? }
 
