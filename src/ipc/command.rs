@@ -13,7 +13,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     error::Result,
@@ -100,6 +100,8 @@ async fn handle_client(stream: tokio::net::UnixStream, ctx: IpcCtx) {
 }
 
 async fn dispatch(line: &str, ctx: &IpcCtx) -> String {
+    debug!(msg = line.trim_end(), "IPC rx");
+
     let requests: Vec<serde_json::Value> = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -115,6 +117,7 @@ async fn dispatch(line: &str, ctx: &IpcCtx) -> String {
 
     let mut out = serde_json::to_string(&responses).unwrap_or_else(|_| "[{}]".into());
     out.push('\n');
+    debug!(msg = out.trim_end(), "IPC tx");
     out
 }
 

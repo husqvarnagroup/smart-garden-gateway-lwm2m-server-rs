@@ -106,6 +106,12 @@ async fn dispatch_op(
         }
     };
 
+    let coap_msg = if tracing::enabled!(tracing::Level::DEBUG) {
+        super::coap_summary(&packet)
+    } else {
+        String::new()
+    };
+
     let bytes = match packet.to_bytes() {
         Ok(b) => b,
         Err(e) => {
@@ -136,7 +142,7 @@ async fn dispatch_op(
                 }
                 break;
             }
-            debug!(%addr, ?token, "CoAP CON sent (attempt {})", attempts + 1);
+            debug!(%addr, attempt = attempts + 1, coap = %coap_msg, "CoAP tx");
 
             sleep(Duration::from_millis(timeout_ms)).await;
 
@@ -255,7 +261,7 @@ async fn dispatch_block_write(
                 }
                 return;
             }
-            debug!(%addr, block_num, more, szx, "Block1 CON PUT sent");
+            debug!(%addr, op_id, block_num, more, szx, bytes = chunk.len(), "CoAP tx Block1 PUT");
 
             match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
                 Ok(Ok(pkt)) => break pkt,

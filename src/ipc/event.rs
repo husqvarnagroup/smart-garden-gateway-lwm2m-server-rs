@@ -8,7 +8,7 @@ use std::{
 
 use tokio::{io::AsyncWriteExt, net::UnixListener, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
 
@@ -62,7 +62,7 @@ impl EventSender {
             },
             "metadata": {"source": "lwm2mserver", "sequence": seq}
         }]);
-        let _ = self.tx.send(format!("{msg}\n"));
+        self.broadcast(msg);
     }
 
     /// Emit a `device/<endpoint>` update event carrying the IPSO-translated /dp payload.
@@ -74,7 +74,7 @@ impl EventSender {
             "payload": payload,
             "metadata": {"source": "lwm2mserver", "sequence": seq}
         }]);
-        let _ = self.tx.send(format!("{msg}\n"));
+        self.broadcast(msg);
     }
 
     /// Emit a `connection_status` event for a registered device.
@@ -90,7 +90,7 @@ impl EventSender {
             },
             "metadata": {"source": "lwm2mserver", "sequence": seq}
         }]);
-        let _ = self.tx.send(format!("{msg}\n"));
+        self.broadcast(msg);
     }
 
     /// Emit a `delete` event for a device that has self-deregistered (factory reset).
@@ -101,7 +101,7 @@ impl EventSender {
             "entity": {"device": endpoint, "path": ""},
             "metadata": {"source": "lwm2mserver", "sequence": seq}
         }]);
-        let _ = self.tx.send(format!("{msg}\n"));
+        self.broadcast(msg);
     }
 
     /// Emit a firmware upload completion event (success or failure).
@@ -114,11 +114,18 @@ impl EventSender {
             "payload": {"success": success, "operation_id": operation_id, "ts": ts},
             "metadata": {"source": "lwm2mserver", "sequence": seq}
         }]);
-        let _ = self.tx.send(format!("{msg}\n"));
+        self.broadcast(msg);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.tx.subscribe()
+    }
+
+    fn broadcast(&self, msg: serde_json::Value) {
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            debug!(msg = %msg, "IPC event tx");
+        }
+        let _ = self.tx.send(format!("{msg}\n"));
     }
 }
 

@@ -5,7 +5,7 @@ pub mod server;
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use coap_lite::Packet;
+use coap_lite::{CoapOption, MessageClass, MessageType, Packet, RequestType as Method};
 use tokio::{
     net::UdpSocket,
     sync::{oneshot, Mutex},
@@ -123,6 +123,56 @@ pub async fn bind(addr: SocketAddr, interface: Option<&str>) -> Result<Arc<UdpSo
 
     info!(bind = %addr, "CoAP UDP socket bound");
     Ok(Arc::new(tokio_sock))
+}
+
+/// Returns a compact one-line description of a CoAP packet for debug logging.
+pub(super) fn coap_summary(pkt: &Packet) -> String {
+    let mtype = match pkt.header.get_type() {
+        MessageType::Confirmable => "CON",
+        MessageType::NonConfirmable => "NON",
+        MessageType::Acknowledgement => "ACK",
+        MessageType::Reset => "RST",
+    };
+
+    let code = match pkt.header.code {
+        MessageClass::Empty => "0.00".to_owned(),
+        MessageClass::Request(m) => match m {
+            Method::Get => "GET".to_owned(),
+            Method::Post => "POST".to_owned(),
+            Method::Put => "PUT".to_owned(),
+            Method::Delete => "DELETE".to_owned(),
+            _ => "?".to_owned(),
+        },
+        MessageClass::Response(s) => {
+            let (class, detail) = response_type_to_class_detail(s);
+            format!("{class}.{detail:02}")
+        }
+        _ => "?".to_owned(),
+    };
+
+    let mid = pkt.header.message_id;
+    let token: String = pkt.get_token().iter().map(|b| format!("{b:02x}")).collect();
+
+    let path = pkt
+        .get_option(CoapOption::UriPath)
+        .map(|opts| {
+            format!(
+                "/{}",
+                opts.iter()
+                    .map(|v| String::from_utf8_lossy(v).into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )
+        })
+        .unwrap_or_default();
+
+    let size = if pkt.payload.is_empty() {
+        String::new()
+    } else {
+        format!(" {}B", pkt.payload.len())
+    };
+
+    format!("{mtype} {code}{path} mid={mid} tok={token}{size}")
 }
 
 /// CoAP content-format values used by LWM2M 1.0.

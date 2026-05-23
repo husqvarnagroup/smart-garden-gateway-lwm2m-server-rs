@@ -15,7 +15,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     error::Result,
@@ -108,6 +108,7 @@ struct ServerCtx<'a> {
 async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
     let packet =
         Packet::from_bytes(data).map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
+    debug!(%addr, coap = %super::coap_summary(&packet), "CoAP rx");
 
     if let Some(endpoint) = ctx.registry.touch(addr).await {
         info!(device = %endpoint, activity = "connection-status", "Device is online");
@@ -356,6 +357,11 @@ fn make_response_bytes(
 
 /// Send a bootstrap-phase CoAP packet (TC=0x0c — no MAC-layer encryption).
 async fn send_bootstrap_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAddr) -> Result<()> {
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        if let Ok(pkt) = Packet::from_bytes(bytes) {
+            debug!(%addr, coap = %super::coap_summary(&pkt), "CoAP tx");
+        }
+    }
     set_tclass(socket, TC_PLAIN);
     socket.send_to(bytes, addr).await?;
     Ok(())
@@ -363,6 +369,11 @@ async fn send_bootstrap_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAdd
 
 /// Send a post-bootstrap CoAP packet (TC=0x1c — MAC-layer encryption active).
 async fn send_encrypted_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAddr) -> Result<()> {
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        if let Ok(pkt) = Packet::from_bytes(bytes) {
+            debug!(%addr, coap = %super::coap_summary(&pkt), "CoAP tx");
+        }
+    }
     set_tclass(socket, TC_ENCRYPTED);
     socket.send_to(bytes, addr).await?;
     Ok(())
