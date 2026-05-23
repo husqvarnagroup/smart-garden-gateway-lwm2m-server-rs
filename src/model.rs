@@ -76,6 +76,9 @@ pub struct PendingOperation {
     pub command: LwM2mCommand,
     /// Fired when a CoAP response arrives or when the operation times out.
     pub response_tx: oneshot::Sender<LwM2mResult>,
+    /// Fired after the first 2.31 Continue ACK in a block-wise write.
+    /// Set only for FOTA uploads; None for all other operations.
+    pub first_ack_tx: Option<oneshot::Sender<LwM2mResult>>,
     pub created_at: Instant,
     pub attempts: u8,
 }

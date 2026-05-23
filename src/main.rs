@@ -174,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
             ipso,
             coap_dispatch_tx_ipc,
             persistence_ipc,
+            event_sender.clone(),
             cancel.clone(),
         ) => { r.map_err(|e| anyhow::anyhow!("ipc: {e}"))? }
 

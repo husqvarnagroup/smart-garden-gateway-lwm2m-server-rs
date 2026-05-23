@@ -29,7 +29,7 @@ const MAX_RETRANSMIT: u8 = 3;
 const BLOCK_SZX: u8 = 5;
 
 /// Minimum payload length that triggers block-wise transfer.
-const BLOCK_THRESHOLD: usize = 1 << (BLOCK_SZX + 4); // 512
+pub const BLOCK_THRESHOLD: usize = 1 << (BLOCK_SZX + 4); // 512
 
 pub async fn run(
     socket: Arc<UdpSocket>,
@@ -181,8 +181,10 @@ async fn dispatch_block_write(
         id: op_id,
         command,
         response_tx,
+        first_ack_tx,
         ..
     } = op;
+    let mut first_ack_tx = first_ack_tx;
     let (path, payload, content_format) = match command {
         LwM2mCommand::Write {
             path,
@@ -293,6 +295,10 @@ async fn dispatch_block_write(
                         detail: 0,
                     }));
                     return;
+                }
+                // Signal the FOTA handler that the transfer has started.
+                if let Some(tx) = first_ack_tx.take() {
+                    let _ = tx.send(Ok(ResourceValue::CoapResponse { class: 2, detail: 31 }));
                 }
                 // Honor device's SZX negotiation (RFC 7959 §2.5).
                 if let Some(dev_szx) = block1_szx_from_response(&ack_pkt) {

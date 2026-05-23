@@ -104,6 +104,19 @@ impl EventSender {
         let _ = self.tx.send(format!("{msg}\n"));
     }
 
+    /// Emit a firmware upload completion event (success or failure).
+    pub fn send_fota_result(&self, endpoint: &str, operation_id: u32, success: bool) {
+        let ts = unix_ts();
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let msg = serde_json::json!([{
+            "op": "update",
+            "entity": {"device": endpoint, "path": "firmware_update/0/package"},
+            "payload": {"success": success, "operation_id": operation_id, "ts": ts},
+            "metadata": {"source": "lwm2mserver", "sequence": seq}
+        }]);
+        let _ = self.tx.send(format!("{msg}\n"));
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.tx.subscribe()
     }

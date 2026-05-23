@@ -452,6 +452,7 @@ async fn handle_registration(
                 args: None,
             },
             response_tx,
+            first_ack_tx: None,
             created_at: std::time::Instant::now(),
             attempts: 0,
         };

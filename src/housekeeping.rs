@@ -76,6 +76,7 @@ pub async fn run(
                                 args: None,
                             },
                             response_tx,
+                            first_ack_tx: None,
                             created_at: Instant::now(),
                             attempts: 0,
                         };

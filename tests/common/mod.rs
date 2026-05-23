@@ -62,6 +62,7 @@ impl TestGateway {
             tmp.path().join("persist"),
             "coap://[::1]",
         ));
+        let persistence_ipc = Arc::clone(&persistence);
         tokio::spawn(lwm2m::server::run(
             socket.clone(),
             registry.clone(),
@@ -94,6 +95,8 @@ impl TestGateway {
             registry.clone(),
             ipso,
             dispatch_tx_ipc,
+            persistence_ipc,
+            event_sender.clone(),
             cancel.clone(),
         ));
         tokio::spawn(event::run(
