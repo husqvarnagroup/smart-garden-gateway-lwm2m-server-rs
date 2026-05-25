@@ -38,9 +38,10 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 
 ## Open issues
 
-- **IPC socket reconnection** — clients connecting to the command or event socket after a service restart must reconnect manually; the sockets are recreated on startup but there is no reconnection or keep-alive mechanism on the service side.
-- **Firmware update support** — OTA firmware update via LWM2M Firmware Update object (object 5) is not yet implemented.
-- **Mower compatibility** — protocol or object-model differences for mower devices have not been validated; compatibility work is pending.
+- **Mower compatibility** — protocol or object-model differences for mower devices have not been validated.
+- **Water Control compatibility** — wake-up not implemented
+
+See [Deviations from Python Code](SPECIFICATION.md#deviations-from-python-code) in `SPECIFICATION.md` for a full list of intentional or known differences.
 
 ---
 
