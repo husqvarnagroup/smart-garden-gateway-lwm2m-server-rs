@@ -20,7 +20,7 @@ const INTERVAL_SECS: u64 = 60;
 const BOOTSTRAP_TIMEOUT_SECS: u64 = 30;
 
 const OFFLINE_PING_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const ONLINE_PING_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const ONLINE_PING_INTERVAL: Duration = Duration::from_secs(9000);
 const OFFLINE_PING_MAX_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Op-ID counter for housekeeping-originated pings. Uses the upper half of u32
