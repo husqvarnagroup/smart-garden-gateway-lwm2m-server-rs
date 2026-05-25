@@ -536,8 +536,9 @@ async fn handle_ack(
             .await
         {
             let payload = session.pubkey_payload.as_deref().unwrap_or(&[]);
-            let valid = bootstrap::parse_device_pubkey(payload)
-                .and_then(|cert_der| bootstrap::validate_device_certificate(&cert_der));
+            let valid = bootstrap::parse_device_pubkey(payload).and_then(|cert_der| {
+                bootstrap::validate_device_certificate(&cert_der, &session.endpoint)
+            });
             match valid {
                 Ok(()) => {
                     info!(

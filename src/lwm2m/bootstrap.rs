@@ -497,8 +497,9 @@ fn pem_to_der(pem: &str) -> crate::error::Result<Vec<u8>> {
 ///   2. KeyUsage extension is present and has digitalSignature.
 ///   3. ExtendedKeyUsage extension is present and contains clientAuth.
 ///   4. CA signature over TBS bytes is valid (P-256 / SHA-256).
-///   5. SubjectAltName contains a URI starting with "sgtin:".
-pub fn validate_device_certificate(cert_der: &[u8]) -> crate::error::Result<()> {
+///   5. SubjectAltName contains a `sgtin:` URI whose SGTIN matches `endpoint`
+///      (case-insensitive, because some certs encode it in lowercase).
+pub fn validate_device_certificate(cert_der: &[u8], endpoint: &str) -> crate::error::Result<()> {
     use x509_cert::der::Decode;
 
     let cert = x509_cert::Certificate::from_der(cert_der)
@@ -521,7 +522,7 @@ pub fn validate_device_certificate(cert_der: &[u8]) -> crate::error::Result<()> 
     cert_check_key_usage(&cert)?;
     cert_check_eku(&cert)?;
     cert_verify_signature(&cert, &ca, cert_der)?;
-    cert_check_sgtin(&cert)?;
+    cert_check_sgtin(&cert, endpoint)?;
 
     Ok(())
 }
@@ -631,8 +632,9 @@ fn tbs_bytes_from_cert_der(cert_der: &[u8]) -> Option<&[u8]> {
     Some(&cert_content[..inner.pos])
 }
 
-/// Check that the SubjectAltName extension contains a URI starting with "sgtin:".
-fn cert_check_sgtin(cert: &x509_cert::Certificate) -> crate::error::Result<()> {
+/// Check that the SubjectAltName extension contains a `sgtin:` URI whose SGTIN
+/// value matches `endpoint` (case-insensitive).
+fn cert_check_sgtin(cert: &x509_cert::Certificate, endpoint: &str) -> crate::error::Result<()> {
     // id-ce-subjectAltName = 2.5.29.17
     // URI GeneralName has tag 0x86 (context [6], implicit, primitive).
     let ext_val = find_extension(cert, &[0x55, 0x1d, 0x11])
@@ -644,11 +646,16 @@ fn cert_check_sgtin(cert: &x509_cert::Certificate) -> crate::error::Result<()> {
             "SAN: expected SEQUENCE".into(),
         ));
     };
-    let found = DerItemIter::new(seq).any(|(tag, val)| tag == 0x86 && val.starts_with(b"sgtin:"));
-    if !found {
-        return Err(crate::error::Error::Bootstrap(
-            "no sgtin: URI in SubjectAltName".into(),
-        ));
+    let uri_bytes = DerItemIter::new(seq)
+        .find(|(tag, val)| *tag == 0x86 && val.starts_with(b"sgtin:"))
+        .map(|(_, val)| val)
+        .ok_or_else(|| crate::error::Error::Bootstrap("no sgtin: URI in SubjectAltName".into()))?;
+
+    let cert_sgtin = std::str::from_utf8(&uri_bytes["sgtin:".len()..]).unwrap_or("");
+    if !cert_sgtin.eq_ignore_ascii_case(endpoint) {
+        return Err(crate::error::Error::Bootstrap(format!(
+            "certificate SGTIN '{cert_sgtin}' does not match endpoint '{endpoint}'"
+        )));
     }
     Ok(())
 }
@@ -1006,12 +1013,15 @@ mod tests {
 
     // ── Certificate validation ────────────────────────────────────────────────
 
+    const DK_SGTIN: &str = "3018f169003fffc000000002";
+    const DMD_SGTIN: &str = "3034F8319C007540000186A2";
+
     // The DK cert (2022-05-19) predates CA1 (2022-06-29) and was signed by an
     // earlier smartsystem key.  Issuer name matches CA1, but signature does not.
     #[test]
     fn validate_rejects_dk_cert_signed_by_old_ca() {
         let cert_der = from_hex(DK_CERT_DER_HEX);
-        let err = validate_device_certificate(&cert_der)
+        let err = validate_device_certificate(&cert_der, DK_SGTIN)
             .expect_err("DK cert signed by old CA should be rejected");
         assert!(
             err.to_string().contains("signature"),
@@ -1023,7 +1033,27 @@ mod tests {
     #[test]
     fn validate_dmd_live_device_certificate() {
         let cert_der = from_hex(DMD_CERT_DER_HEX);
-        validate_device_certificate(&cert_der).expect("DMD cert should be valid");
+        validate_device_certificate(&cert_der, DMD_SGTIN).expect("DMD cert should be valid");
+    }
+
+    // Lowercase endpoint should also match (cert uses uppercase for DMD SGTIN).
+    #[test]
+    fn validate_dmd_cert_endpoint_case_insensitive() {
+        let cert_der = from_hex(DMD_CERT_DER_HEX);
+        validate_device_certificate(&cert_der, &DMD_SGTIN.to_lowercase())
+            .expect("lowercase endpoint should match");
+    }
+
+    // SGTIN in endpoint does not match the one in the certificate's SAN.
+    #[test]
+    fn validate_rejects_sgtin_mismatch() {
+        let cert_der = from_hex(DMD_CERT_DER_HEX);
+        let err = validate_device_certificate(&cert_der, "AABBCCDD00112233")
+            .expect_err("mismatched endpoint SGTIN should be rejected");
+        assert!(
+            err.to_string().contains("does not match"),
+            "expected SGTIN mismatch error, got: {err}"
+        );
     }
 
     // Corrupt the issuer string inside the DK cert so it no longer matches any CA.
@@ -1032,8 +1062,8 @@ mod tests {
     fn validate_rejects_unknown_issuer() {
         let mut cert_der = from_hex(DK_CERT_DER_HEX);
         cert_der[57] ^= 0xff; // turn 's' into something else
-        let err =
-            validate_device_certificate(&cert_der).expect_err("tampered issuer should be rejected");
+        let err = validate_device_certificate(&cert_der, DK_SGTIN)
+            .expect_err("tampered issuer should be rejected");
         assert!(
             err.to_string().contains("issuer"),
             "expected unknown-issuer error, got: {err}"
