@@ -10,6 +10,7 @@ use std::{
 use coap_lite::{
     CoapOption, MessageClass, MessageType, Packet, RequestType as Method, ResponseType as Status,
 };
+use rand_core::RngCore;
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, oneshot},
@@ -319,8 +320,9 @@ async fn handle_bootstrap(
         };
         info!(device = %endpoint, activity = "inclusion", "Device needs authentication");
 
-        // Device needs ~3 s after sending /bs to open its receive socket.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Device needs 0.5–3 s after sending /bs to open its receive socket.
+        let delay_ms = 500 + rand_core::OsRng.next_u32() % 2501;
+        tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
 
         let mut get = Packet::new();
         get.header.set_type(MessageType::Confirmable);
