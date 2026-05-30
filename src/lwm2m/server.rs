@@ -32,7 +32,9 @@ use crate::{
 
 use super::{
     content_format::SENML_CBOR,
-    service::{coap_dedup_key, CoapRequest, CoapRetryPolicy, CoapService},
+    service::{
+        dedup::inbound_dedup_key, inbound::CoapService, retry::CoapRetryPolicy, CoapRequest,
+    },
     set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN,
 };
 
@@ -80,7 +82,7 @@ pub async fn run(
     // duplicate Confirmable messages are identified within EXCHANGE_LIFETIME
     // (247 s with default parameters).  The coalesce layer suppresses redundant
     // processing while the first instance is still in flight.
-    let dedup_layer = CoalesceLayer::builder(coap_dedup_key)
+    let dedup_layer = CoalesceLayer::builder(inbound_dedup_key)
         .name("coap-dedup")
         .build();
 
@@ -130,19 +132,19 @@ pub struct DispatchRequest {
 }
 
 /// Shared server state threaded through packet handlers.
-pub(super) struct ServerCtx<'a> {
-    pub(super) socket: &'a Arc<UdpSocket>,
-    pub(super) registry: &'a DeviceRegistry,
-    pub(super) bootstrap_registry: &'a BootstrapRegistry,
-    pub(super) coap_dispatch_tx: &'a mpsc::Sender<DispatchRequest>,
-    pub(super) event_sender: &'a EventSender,
-    pub(super) ipso: &'a SharedIpso,
-    pub(super) persistence: &'a Arc<PersistenceStore>,
-    pub(super) block_acks: &'a BlockAckMap,
+pub(in crate::lwm2m) struct ServerCtx<'a> {
+    pub(in crate::lwm2m) socket: &'a Arc<UdpSocket>,
+    pub(in crate::lwm2m) registry: &'a DeviceRegistry,
+    pub(in crate::lwm2m) bootstrap_registry: &'a BootstrapRegistry,
+    pub(in crate::lwm2m) coap_dispatch_tx: &'a mpsc::Sender<DispatchRequest>,
+    pub(in crate::lwm2m) event_sender: &'a EventSender,
+    pub(in crate::lwm2m) ipso: &'a SharedIpso,
+    pub(in crate::lwm2m) persistence: &'a Arc<PersistenceStore>,
+    pub(in crate::lwm2m) block_acks: &'a BlockAckMap,
 }
 
 /// Process a parsed CoAP packet. Called by the Tower service layer.
-pub(super) async fn handle_packet_inner(
+pub(in crate::lwm2m) async fn handle_packet_inner(
     packet: &Packet,
     addr: SocketAddr,
     ctx: &ServerCtx<'_>,
