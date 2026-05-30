@@ -152,7 +152,11 @@ pub(super) fn coap_summary(pkt: &Packet) -> String {
     };
 
     let mid = pkt.header.message_id;
-    let token: String = pkt.get_token().iter().map(|b| format!("{b:02x}")).collect();
+    let token: String = pkt.get_token().iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
 
     let path = pkt
         .get_option(CoapOption::UriPath)

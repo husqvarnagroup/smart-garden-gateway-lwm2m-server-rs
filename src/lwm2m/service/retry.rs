@@ -103,7 +103,6 @@ fn is_transient(e: &crate::error::Error) -> bool {
 mod tests {
     use super::*;
     use std::io;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -140,7 +139,7 @@ mod tests {
             let policy = CoapRetryPolicy::new();
             let ms = policy.current_backoff.as_millis();
             assert!(
-                ms >= 2000 && ms <= 3000,
+                (2000..=3000).contains(&ms),
                 "initial backoff {ms} ms outside [2000, 3000]"
             );
         }

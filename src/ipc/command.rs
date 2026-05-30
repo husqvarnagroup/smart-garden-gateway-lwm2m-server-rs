@@ -44,6 +44,7 @@ struct IpcCtx {
     fota_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     path: PathBuf,
     bootstrap_registry: BootstrapRegistry,
