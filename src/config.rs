@@ -49,7 +49,7 @@ pub struct Config {
     pub network_key: Vec<u8>,
 
     /// Directories to scan for IPSO object definition XML files (from --ipso-directories).
-    pub ipso_directories: Vec<std::path::PathBuf>,
+    pub ipso_directories: Vec<PathBuf>,
 }
 
 impl Config {
@@ -81,7 +81,7 @@ fn load_network_key(path: &PathBuf) -> Result<Vec<u8>> {
 }
 
 fn decode_hex(s: &str) -> std::result::Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
+    if s.len() % 2 != 0 {
         return Err("odd length".into());
     }
     (0..s.len())

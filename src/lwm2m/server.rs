@@ -30,7 +30,11 @@ use crate::{
     registry::DeviceRegistry,
 };
 
-use super::{content_format::SENML_CBOR, set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN};
+use super::{
+    content_format::SENML_CBOR,
+    service::{CoapRequest, CoapRetryPolicy, CoapService},
+    set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN,
+};
 
 /// Op-ID counter for server-internal operations (factory reset etc.).
 /// Starts at 0x8000_0000 to stay well clear of IPC op IDs (which begin at 1).
@@ -56,6 +60,22 @@ pub async fn run(
     block_acks: BlockAckMap,
     cancel: CancellationToken,
 ) -> Result<()> {
+    use tower::{retry::RetryLayer, Service, ServiceBuilder};
+
+    let inner = CoapService::new(
+        socket.clone(),
+        registry,
+        bootstrap_registry,
+        coap_dispatch_tx,
+        event_sender,
+        ipso,
+        persistence,
+        block_acks,
+    );
+
+    let retry_layer = RetryLayer::new(CoapRetryPolicy::new());
+    let mut service = ServiceBuilder::new().layer(retry_layer).service(inner);
+
     let mut buf = vec![0u8; MAX_PACKET];
     loop {
         tokio::select! {
@@ -67,17 +87,16 @@ pub async fn run(
                 match result {
                     Ok((len, addr)) => {
                         tracing::debug!(%addr, bytes = len, "CoAP packet received");
-                        let ctx = ServerCtx {
-                            socket: &socket,
-                            registry: &registry,
-                            bootstrap_registry: &bootstrap_registry,
-                            coap_dispatch_tx: &coap_dispatch_tx,
-                            event_sender: &event_sender,
-                            ipso: &ipso,
-                            persistence: &persistence,
-                            block_acks: &block_acks,
+                        let packet = match Packet::from_bytes(&buf[..len]) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!(%addr, "Invalid CoAP packet: {e:?}");
+                                continue;
+                            }
                         };
-                        if let Err(e) = handle_packet(&buf[..len], addr, &ctx).await {
+
+                        let request = CoapRequest { packet, addr };
+                        if let Err(e) = service.call(request).await {
                             warn!(%addr, "Error handling CoAP packet: {e}");
                         }
                     }
@@ -95,21 +114,24 @@ pub struct DispatchRequest {
 }
 
 /// Shared server state threaded through packet handlers.
-struct ServerCtx<'a> {
-    socket: &'a Arc<UdpSocket>,
-    registry: &'a DeviceRegistry,
-    bootstrap_registry: &'a BootstrapRegistry,
-    coap_dispatch_tx: &'a mpsc::Sender<DispatchRequest>,
-    event_sender: &'a EventSender,
-    ipso: &'a SharedIpso,
-    persistence: &'a Arc<PersistenceStore>,
-    block_acks: &'a BlockAckMap,
+pub(super) struct ServerCtx<'a> {
+    pub(super) socket: &'a Arc<UdpSocket>,
+    pub(super) registry: &'a DeviceRegistry,
+    pub(super) bootstrap_registry: &'a BootstrapRegistry,
+    pub(super) coap_dispatch_tx: &'a mpsc::Sender<DispatchRequest>,
+    pub(super) event_sender: &'a EventSender,
+    pub(super) ipso: &'a SharedIpso,
+    pub(super) persistence: &'a Arc<PersistenceStore>,
+    pub(super) block_acks: &'a BlockAckMap,
 }
 
-async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
-    let packet =
-        Packet::from_bytes(data).map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
-    debug!(%addr, coap = %super::coap_summary(&packet), "CoAP rx");
+/// Process a parsed CoAP packet. Called by the Tower service layer.
+pub(super) async fn handle_packet_inner(
+    packet: &Packet,
+    addr: SocketAddr,
+    ctx: &ServerCtx<'_>,
+) -> Result<()> {
+    debug!(%addr, coap = %super::coap_summary(packet), "CoAP rx");
 
     if let Some(endpoint) = ctx.registry.touch(addr).await {
         info!(device = %endpoint, activity = "connection-status", "Device is online");
@@ -120,10 +142,10 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
         // Device initiating a request to the server (registration, update).
         MessageType::Confirmable | MessageType::NonConfirmable => match packet.header.code {
             MessageClass::Request(Method::Post) => {
-                handle_post(packet, addr, ctx).await?;
+                handle_post(packet.clone(), addr, ctx).await?;
             }
             MessageClass::Request(Method::Delete) => {
-                handle_delete(packet, addr, ctx).await?;
+                handle_delete(packet.clone(), addr, ctx).await?;
             }
             other => {
                 warn!(%addr, ?other, "Unexpected CoAP request method");
@@ -132,7 +154,7 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
         // Device acknowledging one of our downlink requests.
         MessageType::Acknowledgement => {
             handle_ack(
-                packet,
+                packet.clone(),
                 addr,
                 ctx.registry,
                 ctx.bootstrap_registry,

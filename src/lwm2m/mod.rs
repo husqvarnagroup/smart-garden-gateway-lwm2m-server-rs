@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod client;
 pub mod ipso;
 pub mod server;
+pub mod service;
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 

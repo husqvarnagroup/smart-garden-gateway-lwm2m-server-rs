@@ -20,6 +20,8 @@ tracing        = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes          = "1"
 tokio-util     = { version = "0.7", features = ["rt"] }
+tower          = { version = "0.5", features = ["util", "retry"] }
+tower-resilience-coalesce = { version = "0.9.3", default-features = false }
 anyhow         = "1"
 clap           = { version = "4", features = ["derive"] }
 socket2        = { version = "0.5", features = ["all"] }
