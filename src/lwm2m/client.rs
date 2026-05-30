@@ -1,4 +1,14 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use coap_lite::{
     CoapOption, MessageClass, MessageType, Packet, RequestType as Method, ResponseType as Status,
@@ -9,6 +19,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
+use tower::Service;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -31,6 +42,184 @@ const BLOCK_SZX: u8 = 5;
 /// Minimum payload length that triggers block-wise transfer.
 pub const BLOCK_THRESHOLD: usize = 1 << (BLOCK_SZX + 4); // 512
 
+// ── Tower service ────────────────────────────────────────────────────────────
+
+/// Tower service that dispatches outbound LwM2M CoAP operations to devices.
+///
+/// Each call processes a [`DispatchRequest`] containing one or more pending
+/// operations destined for a single device address. The service handles CoAP
+/// encoding, retransmission with exponential backoff, and block-wise transfer
+/// for large payloads. Individual operation results are delivered via the
+/// oneshot channels embedded in each [`PendingOperation`].
+#[derive(Clone)]
+pub struct DispatchService {
+    socket: Arc<UdpSocket>,
+    registry: DeviceRegistry,
+    event_sender: EventSender,
+    block_acks: BlockAckMap,
+    mid_counter: Arc<AtomicU16>,
+}
+
+impl DispatchService {
+    /// Create a new dispatch service.
+    pub fn new(
+        socket: Arc<UdpSocket>,
+        registry: DeviceRegistry,
+        event_sender: EventSender,
+        block_acks: BlockAckMap,
+    ) -> Self {
+        Self {
+            socket,
+            registry,
+            event_sender,
+            block_acks,
+            mid_counter: Arc::new(AtomicU16::new(1)),
+        }
+    }
+
+    fn next_mid(&self) -> u16 {
+        loop {
+            let mid = self.mid_counter.fetch_add(1, Ordering::Relaxed);
+            if mid != 0 {
+                return mid;
+            }
+            // Skip 0, try again (wraps to 1).
+            self.mid_counter
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .ok();
+        }
+    }
+
+    fn alloc_mid_range(&self, count: u16) -> u16 {
+        let start = self.mid_counter.fetch_add(count, Ordering::Relaxed);
+        if start == 0 {
+            self.mid_counter
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .ok();
+            return 1;
+        }
+        start
+    }
+}
+
+impl Service<DispatchRequest> for DispatchService {
+    type Response = ();
+    type Error = crate::error::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: DispatchRequest) -> Self::Future {
+        let svc = self.clone();
+        Box::pin(async move {
+            for op in req.ops {
+                svc.dispatch_op(req.addr, op).await;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl DispatchService {
+    async fn dispatch_op(&self, addr: SocketAddr, mut op: PendingOperation) {
+        // Large Write payloads require block-wise transfer (RFC 7959).
+        if let LwM2mCommand::Write { ref value, .. } = op.command {
+            if value.len() > BLOCK_THRESHOLD {
+                let max_blocks = value.len().div_ceil(BLOCK_THRESHOLD);
+                let start_mid = self.alloc_mid_range(max_blocks as u16);
+                tokio::spawn(dispatch_block_write(
+                    self.socket.clone(),
+                    self.registry.clone(),
+                    self.block_acks.clone(),
+                    addr,
+                    op,
+                    self.event_sender.clone(),
+                    start_mid,
+                ));
+                return;
+            }
+        }
+
+        // CoAP token: 8 bytes, lower 4 bytes = op id (u32), upper 4 bytes zero.
+        let token: [u8; 8] = {
+            let mut arr = [0u8; 8];
+            arr[..4].copy_from_slice(&op.id.to_le_bytes());
+            arr
+        };
+        let mid = self.next_mid();
+
+        let packet = match build_request(&op.command, token, mid) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(op_id = op.id, "Failed to build CoAP request: {e}");
+                let _ = op.response_tx.send(Err(LwM2mError::BadRequest));
+                return;
+            }
+        };
+
+        let coap_msg = if tracing::enabled!(tracing::Level::DEBUG) {
+            super::coap_summary(&packet)
+        } else {
+            String::new()
+        };
+
+        let bytes = match packet.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(op_id = op.id, "Failed to encode CoAP packet: {e:?}");
+                let _ = op.response_tx.send(Err(LwM2mError::BadRequest));
+                return;
+            }
+        };
+
+        op.attempts += 1;
+        self.registry.place_in_flight(addr, token, op).await;
+
+        // Send with retransmit loop (Confirmable).
+        let socket = self.socket.clone();
+        let registry = self.registry.clone();
+        let event_sender = self.event_sender.clone();
+        tokio::spawn(async move {
+            let mut timeout_ms = ACK_TIMEOUT_MS;
+            let mut attempts = 0u8;
+
+            loop {
+                set_tclass(&socket, TC_ENCRYPTED);
+                if let Err(e) = socket.send_to(&bytes, addr).await {
+                    warn!(%addr, "Failed to send: {e}");
+                    mark_device_offline(&registry, addr, &event_sender).await;
+                    break;
+                }
+                debug!(%addr, attempt = attempts + 1, coap = %coap_msg, "CoAP tx");
+
+                sleep(Duration::from_millis(timeout_ms)).await;
+
+                // Check if the op was already completed (ACK received).
+                if !registry.is_in_flight(addr, &token).await {
+                    return;
+                }
+
+                attempts += 1;
+                if attempts >= MAX_RETRANSMIT {
+                    if let Some(op) = registry.complete_in_flight(addr, &token).await {
+                        warn!(%addr, op_id = op.id, "Device unreachable, operation timed out");
+                        let _ = op.response_tx.send(Err(LwM2mError::Timeout));
+                    }
+                    mark_device_offline(&registry, addr, &event_sender).await;
+                    return;
+                }
+
+                // Exponential backoff.
+                timeout_ms *= 2;
+            }
+        });
+    }
+}
+
+// ── Run loop ─────────────────────────────────────────────────────────────────
+
 pub async fn run(
     socket: Arc<UdpSocket>,
     registry: DeviceRegistry,
@@ -39,7 +228,7 @@ pub async fn run(
     block_acks: BlockAckMap,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let mut mid_counter: u16 = 1;
+    let mut service = DispatchService::new(socket, registry, event_sender, block_acks);
 
     loop {
         tokio::select! {
@@ -48,122 +237,12 @@ pub async fn run(
                 return Ok(());
             }
             Some(req) = dispatch_rx.recv() => {
-                for op in req.ops {
-                    dispatch_op(&socket, &registry, req.addr, op, &mut mid_counter, &event_sender, &block_acks).await;
+                if let Err(e) = service.call(req).await {
+                    warn!("Dispatch error: {e}");
                 }
             }
         }
     }
-}
-
-async fn dispatch_op(
-    socket: &Arc<UdpSocket>,
-    registry: &DeviceRegistry,
-    addr: SocketAddr,
-    mut op: PendingOperation,
-    mid_counter: &mut u16,
-    event_sender: &EventSender,
-    block_acks: &BlockAckMap,
-) {
-    // Large Write payloads require block-wise transfer (RFC 7959).
-    if let LwM2mCommand::Write { ref value, .. } = op.command {
-        if value.len() > BLOCK_THRESHOLD {
-            // Pre-allocate enough MIDs for the worst case (all blocks at the initial SZX).
-            let max_blocks = value.len().div_ceil(BLOCK_THRESHOLD);
-            let start_mid = *mid_counter;
-            *mid_counter = mid_counter.wrapping_add(max_blocks as u16);
-            if *mid_counter == 0 {
-                *mid_counter = 1;
-            }
-            tokio::spawn(dispatch_block_write(
-                socket.clone(),
-                registry.clone(),
-                block_acks.clone(),
-                addr,
-                op,
-                event_sender.clone(),
-                start_mid,
-            ));
-            return;
-        }
-    }
-
-    // CoAP token: 8 bytes, lower 4 bytes = op id (u32), upper 4 bytes zero.
-    // AtomicU64 is unavailable on 32-bit ARM, so op ids are u32.
-    let token: [u8; 8] = {
-        let mut arr = [0u8; 8];
-        arr[..4].copy_from_slice(&op.id.to_le_bytes());
-        arr
-    };
-    let mid = next_mid(mid_counter);
-
-    let packet = match build_request(&op.command, token, mid) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(op_id = op.id, "Failed to build CoAP request: {e}");
-            let _ = op.response_tx.send(Err(LwM2mError::BadRequest));
-            return;
-        }
-    };
-
-    let coap_msg = if tracing::enabled!(tracing::Level::DEBUG) {
-        super::coap_summary(&packet)
-    } else {
-        String::new()
-    };
-
-    let bytes = match packet.to_bytes() {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(op_id = op.id, "Failed to encode CoAP packet: {e:?}");
-            let _ = op.response_tx.send(Err(LwM2mError::BadRequest));
-            return;
-        }
-    };
-
-    op.attempts += 1;
-    registry.place_in_flight(addr, token, op).await;
-
-    // Send with retransmit loop (Confirmable).
-    let socket = socket.clone();
-    let registry = registry.clone();
-    let event_sender = event_sender.clone();
-    tokio::spawn(async move {
-        let mut timeout_ms = ACK_TIMEOUT_MS;
-        let mut attempts = 0u8;
-
-        loop {
-            set_tclass(&socket, TC_ENCRYPTED);
-            if let Err(e) = socket.send_to(&bytes, addr).await {
-                warn!(%addr, "Failed to send: {e}");
-                mark_device_offline(&registry, addr, &event_sender).await;
-                break;
-            }
-            debug!(%addr, attempt = attempts + 1, coap = %coap_msg, "CoAP tx");
-
-            sleep(Duration::from_millis(timeout_ms)).await;
-
-            // Check if the op was already completed (ACK received).
-            if !registry.is_in_flight(addr, &token).await {
-                // Already acked — nothing more to do.
-                return;
-            }
-
-            attempts += 1;
-            if attempts >= MAX_RETRANSMIT {
-                // Final timeout: retrieve and fail the op.
-                if let Some(op) = registry.complete_in_flight(addr, &token).await {
-                    warn!(%addr, op_id = op.id, "Device unreachable, operation timed out");
-                    let _ = op.response_tx.send(Err(LwM2mError::Timeout));
-                }
-                mark_device_offline(&registry, addr, &event_sender).await;
-                return;
-            }
-
-            // Exponential backoff.
-            timeout_ms *= 2;
-        }
-    });
 }
 
 /// Send a large Write payload using CoAP Block1 option (RFC 7959).
@@ -381,12 +460,6 @@ async fn mark_device_offline(
         info!(device = %endpoint, activity = "connection-status", "Device is offline");
         event_sender.send_connection_status(&endpoint, false);
     }
-}
-
-fn next_mid(counter: &mut u16) -> u16 {
-    let mid = *counter;
-    *counter = counter.wrapping_add(1).max(1);
-    mid
 }
 
 /// Extract the SZX from a Block1 option in a CoAP response (e.g. 2.31 Continue).
