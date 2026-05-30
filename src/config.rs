@@ -89,3 +89,134 @@ fn decode_hex(s: &str) -> std::result::Result<Vec<u8>, String> {
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // ── decode_hex ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn decode_hex_valid_lowercase() {
+        assert_eq!(
+            decode_hex("0123456789abcdef").unwrap(),
+            vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
+        );
+    }
+
+    #[test]
+    fn decode_hex_valid_uppercase() {
+        assert_eq!(
+            decode_hex("AABBCCDD").unwrap(),
+            vec![0xaa, 0xbb, 0xcc, 0xdd]
+        );
+    }
+
+    #[test]
+    fn decode_hex_empty_string() {
+        assert_eq!(decode_hex("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn decode_hex_odd_length_fails() {
+        let err = decode_hex("abc").unwrap_err();
+        assert!(err.contains("odd length"), "got: {err}");
+    }
+
+    #[test]
+    fn decode_hex_invalid_chars_fails() {
+        let err = decode_hex("zz00").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn decode_hex_16_byte_key() {
+        let hex = "00112233445566778899aabbccddeeff";
+        let bytes = decode_hex(hex).unwrap();
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(bytes[0], 0x00);
+        assert_eq!(bytes[15], 0xff);
+    }
+
+    // ── load_network_key ─────────────────────────────────────────────────────
+
+    #[test]
+    fn load_network_key_valid_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            r#"{{"network_key": "0123456789abcdef0123456789abcdef"}}"#
+        )
+        .unwrap();
+        let key = load_network_key(&f.path().to_path_buf()).unwrap();
+        assert_eq!(key.len(), 16);
+        assert_eq!(key[0], 0x01);
+        assert_eq!(key[15], 0xef);
+    }
+
+    #[test]
+    fn load_network_key_missing_file() {
+        let result = load_network_key(&PathBuf::from("/nonexistent/path/key.json"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot read"), "got: {err}");
+    }
+
+    #[test]
+    fn load_network_key_invalid_json() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "not json at all").unwrap();
+        let result = load_network_key(&f.path().to_path_buf());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_network_key_missing_field() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"other_field": "value"}}"#).unwrap();
+        let result = load_network_key(&f.path().to_path_buf());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("network_key"), "got: {err}");
+    }
+
+    #[test]
+    fn load_network_key_field_not_string() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"network_key": 12345}}"#).unwrap();
+        let result = load_network_key(&f.path().to_path_buf());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("network_key"), "got: {err}");
+    }
+
+    #[test]
+    fn load_network_key_invalid_hex() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"network_key": "not_hex_data!!"}}"#).unwrap();
+        let result = load_network_key(&f.path().to_path_buf());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("hex"), "got: {err}");
+    }
+
+    #[test]
+    fn load_network_key_odd_length_hex() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"network_key": "abc"}}"#).unwrap();
+        let result = load_network_key(&f.path().to_path_buf());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("odd length"), "got: {err}");
+    }
+
+    #[test]
+    fn load_network_key_empty_hex_string() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"network_key": ""}}"#).unwrap();
+        let key = load_network_key(&f.path().to_path_buf()).unwrap();
+        assert!(key.is_empty());
+    }
+}
