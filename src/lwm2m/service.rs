@@ -28,7 +28,7 @@ pub struct CoapRequest {
 }
 
 /// A CoAP response to send back over UDP.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CoapResponse {
     /// Serialised CoAP packet bytes to send.
     pub bytes: Vec<u8>,
@@ -36,6 +36,23 @@ pub struct CoapResponse {
     pub addr: SocketAddr,
     /// IPv6 Traffic Class to set on the outgoing socket.
     pub traffic_class: u32,
+}
+
+// ── LwM2M 1.1 / RFC 7252 CoAP deduplication ─────────────────────────────────
+
+/// CoAP message deduplication key: (source address, message ID).
+///
+/// Per RFC 7252 §4.5, a server MUST be able to detect duplicate Confirmable
+/// messages based on the combination of the sender endpoint and the Message ID.
+pub type CoapDeduplicationKey = (SocketAddr, u16);
+
+/// Extract the deduplication key from an inbound CoAP request.
+///
+/// The key combines the source address and CoAP message ID, which together
+/// uniquely identify a logical message within the EXCHANGE_LIFETIME window
+/// (247 s per RFC 7252 §4.8.2 with default parameters).
+pub fn coap_dedup_key(req: &CoapRequest) -> CoapDeduplicationKey {
+    (req.addr, req.packet.header.message_id)
 }
 
 // ── LwM2M 1.1 / RFC 7252 CoAP retransmission parameters ─────────────────────
@@ -82,15 +99,18 @@ impl Default for CoapRetryPolicy {
 
 use rand_core::RngCore;
 
-impl tower::retry::Policy<CoapRequest, Option<CoapResponse>, crate::error::Error>
-    for CoapRetryPolicy
-{
+/// Service-level error type: wraps [`crate::error::Error`] in an `Arc` to
+/// satisfy the `Clone` bound required by the coalesce deduplication layer,
+/// without polluting the domain error type with `Clone` semantics.
+pub type ServiceError = Arc<crate::error::Error>;
+
+impl tower::retry::Policy<CoapRequest, Option<CoapResponse>, ServiceError> for CoapRetryPolicy {
     type Future = Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn retry(
         &mut self,
         _req: &mut CoapRequest,
-        result: &mut Result<Option<CoapResponse>, crate::error::Error>,
+        result: &mut Result<Option<CoapResponse>, ServiceError>,
     ) -> Option<Self::Future> {
         match result {
             // Success — no retry needed.
@@ -188,7 +208,7 @@ impl CoapService {
 
 impl Service<CoapRequest> for CoapService {
     type Response = Option<CoapResponse>;
-    type Error = crate::error::Error;
+    type Error = ServiceError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -202,10 +222,7 @@ impl Service<CoapRequest> for CoapService {
 }
 
 impl CoapService {
-    async fn handle_request(
-        self,
-        req: CoapRequest,
-    ) -> Result<Option<CoapResponse>, crate::error::Error> {
+    async fn handle_request(self, req: CoapRequest) -> Result<Option<CoapResponse>, ServiceError> {
         use super::server;
 
         let ctx = server::ServerCtx {
@@ -219,7 +236,9 @@ impl CoapService {
             block_acks: &self.block_acks,
         };
 
-        server::handle_packet_inner(&req.packet, req.addr, &ctx).await?;
+        server::handle_packet_inner(&req.packet, req.addr, &ctx)
+            .await
+            .map_err(Arc::new)?;
 
         // Responses are sent directly by the handlers via the socket.
         // Returning None here signals the transport that no additional

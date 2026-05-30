@@ -32,7 +32,7 @@ use crate::{
 
 use super::{
     content_format::SENML_CBOR,
-    service::{CoapRequest, CoapRetryPolicy, CoapService},
+    service::{coap_dedup_key, CoapRequest, CoapRetryPolicy, CoapService},
     set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN,
 };
 
@@ -61,6 +61,7 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<()> {
     use tower::{retry::RetryLayer, Service, ServiceBuilder};
+    use tower_resilience_coalesce::CoalesceLayer;
 
     let inner = CoapService::new(
         socket.clone(),
@@ -74,7 +75,19 @@ pub async fn run(
     );
 
     let retry_layer = RetryLayer::new(CoapRetryPolicy::new());
-    let mut service = ServiceBuilder::new().layer(retry_layer).service(inner);
+    // Deduplication layer: coalesces concurrent requests sharing the same
+    // (source address, CoAP message ID) pair.  Per RFC 7252 §4.5 / LwM2M 1.1,
+    // duplicate Confirmable messages are identified within EXCHANGE_LIFETIME
+    // (247 s with default parameters).  The coalesce layer suppresses redundant
+    // processing while the first instance is still in flight.
+    let dedup_layer = CoalesceLayer::builder(coap_dedup_key)
+        .name("coap-dedup")
+        .build();
+
+    let mut service = ServiceBuilder::new()
+        .layer(dedup_layer)
+        .layer(retry_layer)
+        .service(inner);
 
     let mut buf = vec![0u8; MAX_PACKET];
     loop {
@@ -96,8 +109,11 @@ pub async fn run(
                         };
 
                         let request = CoapRequest { packet, addr };
-                        if let Err(e) = service.call(request).await {
-                            warn!(%addr, "Error handling CoAP packet: {e}");
+                        match service.call(request).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!(%addr, "Error handling CoAP packet: {e}");
+                            }
                         }
                     }
                     Err(e) => error!("UDP recv error: {e}"),
