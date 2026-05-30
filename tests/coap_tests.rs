@@ -186,3 +186,99 @@ async fn coap_deregister_included_device_preserves_inclusion() {
 
     gw.stop().await;
 }
+
+/// Sending a duplicate Confirmable message (same message ID from the same source)
+/// while the first is still being processed should be deduplicated per RFC 7252 §4.5.
+/// We verify this by sending two registration packets with identical message IDs
+/// back-to-back and confirming the device is only registered once.
+#[tokio::test]
+async fn coap_duplicate_message_id_is_deduplicated() {
+    let gw = common::TestGateway::start().await;
+
+    // Mark device as included so registration proceeds normally.
+    gw.bootstrap_registry.mark_included("test-device").await;
+
+    let sock = UdpSocket::bind("[::1]:0").await.unwrap();
+
+    // Build a registration packet with a specific message ID.
+    let pkt_bytes = registration_packet(); // message_id = 0x0001
+
+    // Send the same packet twice in rapid succession (simulating a CoAP retransmit
+    // that arrives while the server is still processing the first).
+    sock.send_to(&pkt_bytes, gw.coap_addr).await.unwrap();
+    sock.send_to(&pkt_bytes, gw.coap_addr).await.unwrap();
+
+    // We should receive a response (the coalesce layer returns the same result to both).
+    let mut buf = vec![0u8; 256];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
+        .await
+        .expect("timeout waiting for first response")
+        .unwrap();
+
+    let resp = Packet::from_bytes(&buf[..len]).unwrap();
+    assert_eq!(resp.header.code, MessageClass::Response(Status::Created));
+
+    // Allow any processing to settle.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The device registry should contain exactly one device entry, proving the
+    // duplicate was coalesced rather than processed independently.
+    let snapshots = gw.registry.snapshot().await;
+    let matching: Vec<_> = snapshots
+        .iter()
+        .filter(|s| s.endpoint == "test-device")
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one registration for the device, got {}",
+        matching.len()
+    );
+
+    gw.stop().await;
+}
+
+/// Messages with different message IDs from the same source are NOT duplicates
+/// and must each be processed independently.
+#[tokio::test]
+async fn coap_different_message_ids_not_deduplicated() {
+    let gw = common::TestGateway::start().await;
+    gw.bootstrap_registry.mark_included("test-device").await;
+
+    let sock = UdpSocket::bind("[::1]:0").await.unwrap();
+
+    // First registration packet — message_id = 0x0001
+    let pkt1 = registration_packet();
+    sock.send_to(&pkt1, gw.coap_addr).await.unwrap();
+
+    let mut buf = vec![0u8; 256];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
+        .await
+        .expect("timeout")
+        .unwrap();
+    let resp1 = Packet::from_bytes(&buf[..len]).unwrap();
+    assert_eq!(resp1.header.code, MessageClass::Response(Status::Created));
+
+    // Second registration packet — different message_id (0x0002).
+    let mut pkt = Packet::new();
+    pkt.header.set_type(MessageType::Confirmable);
+    pkt.header.code = MessageClass::Request(Method::Post);
+    pkt.header.message_id = 0x0002; // different MID
+    pkt.set_token(vec![0x02]);
+    pkt.add_option(coap_lite::CoapOption::UriPath, b"rd".to_vec());
+    pkt.add_option(coap_lite::CoapOption::UriQuery, b"ep=test-device".to_vec());
+    pkt.add_option(coap_lite::CoapOption::UriQuery, b"lt=3600".to_vec());
+    pkt.add_option(coap_lite::CoapOption::UriQuery, b"b=U".to_vec());
+    let pkt2 = pkt.to_bytes().unwrap();
+
+    sock.send_to(&pkt2, gw.coap_addr).await.unwrap();
+
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
+        .await
+        .expect("timeout")
+        .unwrap();
+    let resp2 = Packet::from_bytes(&buf[..len]).unwrap();
+    assert_eq!(resp2.header.code, MessageClass::Response(Status::Created));
+
+    gw.stop().await;
+}
