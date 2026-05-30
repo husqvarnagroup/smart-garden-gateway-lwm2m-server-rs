@@ -29,7 +29,9 @@ use crate::{
     registry::DeviceRegistry,
 };
 
-use super::{server::DispatchRequest, set_tclass, BlockAckMap, TC_ENCRYPTED};
+use super::{
+    server::DispatchRequest, service::ServiceError, set_tclass, BlockAckMap, TC_ENCRYPTED,
+};
 
 /// CoAP retransmission constants (RFC 7252 defaults).
 const ACK_TIMEOUT_MS: u64 = 2_000;
@@ -104,10 +106,10 @@ impl DispatchService {
 
 impl Service<DispatchRequest> for DispatchService {
     type Response = ();
-    type Error = crate::error::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+    type Error = ServiceError;
+    type Future = Pin<Box<dyn Future<Output = std::result::Result<(), ServiceError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
@@ -218,6 +220,22 @@ impl DispatchService {
     }
 }
 
+// ── Deduplication ────────────────────────────────────────────────────────────
+
+/// Deduplication key for outbound dispatch requests: (destination address, first op ID).
+///
+/// Per RFC 7252 §4.5, duplicate messages are identified by (endpoint, message ID).
+/// On the client/dispatch side, the operation ID serves as the logical identifier:
+/// if the same operation is dispatched again while still in flight, the coalesce
+/// layer suppresses redundant processing.
+pub type DispatchDeduplicationKey = (SocketAddr, u32);
+
+/// Extract the deduplication key from a dispatch request.
+pub fn dispatch_dedup_key(req: &DispatchRequest) -> DispatchDeduplicationKey {
+    let first_op_id = req.ops.first().map(|op| op.id).unwrap_or(0);
+    (req.addr, first_op_id)
+}
+
 // ── Run loop ─────────────────────────────────────────────────────────────────
 
 pub async fn run(
@@ -228,7 +246,22 @@ pub async fn run(
     block_acks: BlockAckMap,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let mut service = DispatchService::new(socket, registry, event_sender, block_acks);
+    use tower::{Service, ServiceBuilder};
+    use tower_resilience_coalesce::CoalesceLayer;
+
+    let inner = DispatchService::new(socket, registry, event_sender, block_acks);
+
+    // Deduplication layer: coalesces concurrent dispatch requests targeting the
+    // same (destination address, operation ID).  Per RFC 7252 §4.5 / LwM2M 1.1,
+    // this prevents redundant processing if the same operation is triggered
+    // multiple times while already in flight.  CoAP-level retransmission with
+    // exponential backoff (RFC 7252 §4.2) is handled per-operation inside the
+    // service.
+    let dedup_layer = CoalesceLayer::builder(dispatch_dedup_key)
+        .name("coap-dispatch-dedup")
+        .build();
+
+    let mut service = ServiceBuilder::new().layer(dedup_layer).service(inner);
 
     loop {
         tokio::select! {
@@ -237,8 +270,11 @@ pub async fn run(
                 return Ok(());
             }
             Some(req) = dispatch_rx.recv() => {
-                if let Err(e) = service.call(req).await {
-                    warn!("Dispatch error: {e}");
+                match service.call(req).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("Dispatch error: {e}");
+                    }
                 }
             }
         }
