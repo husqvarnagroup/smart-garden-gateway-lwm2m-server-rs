@@ -1,6 +1,10 @@
 Code
 * Run "cargo fmt" before each commit
 * Ensure that "cargo clippy" and "cargo test" passes before each commit
+* Run "cargo llvm-cov" for code coverage (requires `cargo-llvm-cov` and `llvm-tools-preview`)
+  * `cargo llvm-cov` — text report
+  * `cargo llvm-cov --html` — HTML report in `target/llvm-cov/html/`
+  * `cargo llvm-cov --summary-only` — one-line summary
 
 Logging
 * Log message rules
