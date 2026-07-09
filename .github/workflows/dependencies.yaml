@@ -1,0 +1,32 @@
+name: Dependencies Check
+
+on:
+  [pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies_check:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+    - name: Install Rust
+      run: |
+        curl https://sh.rustup.rs -sSf | sh -s -- -y
+        rustup update
+        rustup install nightly
+        rustup default nightly
+
+    - name: Install Tools
+      run: |
+        cargo --version
+        cargo install cargo-machete
+
+    - name: Run cargo machete
+      run: |
+        cargo machete

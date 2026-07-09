@@ -1,0 +1,58 @@
+name: Run Sanitizers
+
+on:
+  push:
+    branches: '**'
+  pull_request:
+    branches: '**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust
+        run: |
+          curl https://sh.rustup.rs -sSf | sh -s -- -y
+          rustup update
+          rustup install nightly
+          rustup default nightly
+          rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+          rustc --version
+
+      - name: Test with Address Sanitizer
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+
+      - name: Test with Leak Sanitizer
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: -Zsanitizer=leak
+          RUSTDOCFLAGS: -Zsanitizer=leak
+
+      - name: Test with Memory Sanitizer
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: -Zsanitizer=memory -Zsanitizer-memory-track-origins
+          RUSTDOCFLAGS: -Zsanitizer=memory -Zsanitizer-memory-track-origins
+
+      - name: Test with Thread Sanitizer
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          RUSTDOCFLAGS: -Zsanitizer=thread
+
+      - name: Test with SafeStack Sanitizer
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: -Zsanitizer=safestack
+          RUSTDOCFLAGS: -Zsanitizer=safestack
