@@ -41,5 +41,6 @@ getrandom = "=0.3.0"
 opt-level     = "z"
 lto           = true
 codegen-units = 1
-strip         = true
-panic         = "abort"
+# no strip = true: Yocto strips binaries itself (QA error already-stripped)
+# panic = "abort" not possible: Yocto's Rust toolchain ships all std crates
+# (including panic_abort) built with -C panic=unwind
