@@ -109,13 +109,7 @@ Python (debug mode) command-socket paths: `read bootstrap-status`,
 bootstrap-requests/authenticate|allow`. Useful for field troubleshooting;
 none exist in Rust.
 
-### 10. LWM2M 1.0 / TLV content format
-
-Python supported LWM2M 1.0 (TLV) and 1.1 (SenML+CBOR); Rust is
-SenML+CBOR-only. Only needed if devices with old firmware must still be
-onboarded — confirm fleet status before investing.
-
-### 11. Test-coverage parity
+### 10. Test-coverage parity
 
 Python has ~20 test modules (inclusion, exclusion, FOTA, connection
 status, device wakeup, timezone, crypto, service plane, e2e SenML-CBOR,
@@ -161,8 +155,6 @@ work package.
       optional).
 - [ ] **LDC-1 (decide): Dongle compatibility mode** — port fe80→fc00
       address translation or formally drop it.
-- [ ] **TLV-1 (decide): LWM2M 1.0/TLV support** — confirm whether any
-      fleet devices still require TLV; port or close as won't-fix.
 - [ ] **TEST-1: Test parity** — port the Python test scenarios
       (inclusion/exclusion flows, FOTA failure paths, connectivity
       transitions, bootstrap restart/resend) to Rust integration tests.
