@@ -5,7 +5,7 @@ Code
 Logging
 * Log message rules
   * Start with capital letter
-  * INFO, WARN and ERROR are read by a troubleshoort. Avoid too technical terms that require knowledge of the code.
+  * INFO, WARN and ERROR are read by a troubleshooter. Avoid too technical terms that require knowledge of the code.
   * DEBUG are only read by developers, can be technical / reference concepts from code (variable names, etc.)
 * Include following structured fields if available / applicable
   * device: the sgtin of the device
