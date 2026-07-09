@@ -76,3 +76,21 @@ jobs:
       run: |
         pipx install pre-commit==4.2.0
         pre-commit run --all-files
+
+  gitlint:
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      with:
+        # Full history is needed to lint the whole commit range of the PR
+        fetch-depth: 0
+
+    - name: gitlint
+      run: |
+        # The gitlint package is a meta-package; the executable is in gitlint-core
+        pipx install gitlint-core==0.19.1
+        gitlint --version
+        gitlint --commits ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
