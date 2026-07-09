@@ -1,0 +1,3 @@
+[default]
+# Ignore long base64 strings, e.g. embedded PEM certificates
+extend-ignore-re = ["[0-9A-Za-z+/=]{40,}"]
