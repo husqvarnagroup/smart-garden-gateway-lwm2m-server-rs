@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             info!("Shutdown signal received");
-            let _ = sd_notify::notify(&[NotifyState::Stopping]);
+            let _ = sd_notify::notify(false, &[NotifyState::Stopping]);
             cancel.cancel();
         });
     }
@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
             let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
             if sigterm.recv().await.is_some() {
                 info!("Shutdown signal received");
-                let _ = sd_notify::notify(&[NotifyState::Stopping]);
+                let _ = sd_notify::notify(false, &[NotifyState::Stopping]);
                 cancel.cancel();
             }
         });
@@ -151,16 +151,18 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let _ = sd_notify::notify(&[NotifyState::Ready]);
+    let _ = sd_notify::notify(false, &[NotifyState::Ready]);
 
-    if let Some(interval) = sd_notify::watchdog_enabled() {
+    let mut watchdog_usec = 0;
+    if sd_notify::watchdog_enabled(false, &mut watchdog_usec) {
+        let interval = std::time::Duration::from_micros(watchdog_usec);
         let cancel = cancel.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval / 2);
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        let _ = sd_notify::notify(&[NotifyState::Watchdog]);
+                        let _ = sd_notify::notify(false, &[NotifyState::Watchdog]);
                     }
                     _ = cancel.cancelled() => break,
                 }
