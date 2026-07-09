@@ -54,7 +54,7 @@ pub struct IpsoModel {
 
 impl IpsoModel {
     /// Load all `*.xml` files from each directory in `dirs`.
-    /// Logs warnings for unreadable directories or unparseable files.
+    /// Logs warnings for unreadable directories or unparsable files.
     pub fn load_dirs(dirs: &[impl AsRef<Path>]) -> Self {
         let mut model = IpsoModel::default();
         for dir in dirs {
