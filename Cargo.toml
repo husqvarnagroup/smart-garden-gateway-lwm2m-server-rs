@@ -15,7 +15,6 @@ tempfile = "=3.24.0" # held back for Rust 1.75.0
 aes            = "0.8"
 anyhow         = "1"
 base64         = "0.22"
-bytes          = "1"
 ciborium       = "0.2"
 clap           = { version = "4.5.61", features = ["derive"] }
 coap-lite      = "0.11"
@@ -37,6 +36,11 @@ x509-cert      = { version = "0.2", default-features = false }
 clap_lex = "=1.0.1"
 getrandom = "=0.3.0"
 sd-notify = "0.4.5"
+
+[package.metadata.cargo-machete]
+# Ignored as that are pinned transitive dependencies
+ignored = ["clap_lex", "getrandom"]
+
 
 [profile.release]
 opt-level     = "z"

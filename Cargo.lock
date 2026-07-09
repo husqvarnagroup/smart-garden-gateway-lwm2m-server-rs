@@ -563,7 +563,6 @@ dependencies = [
  "aes",
  "anyhow",
  "base64",
- "bytes",
  "ciborium",
  "clap",
  "clap_lex",
