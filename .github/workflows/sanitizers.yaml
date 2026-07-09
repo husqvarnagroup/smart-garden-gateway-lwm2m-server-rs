@@ -1,0 +1,53 @@
+name: Run Sanitizers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The -Z flags require nightly; pinned so upstream nightly changes
+  # don't break CI. Bump deliberately.
+  NIGHTLY_VERSION: nightly-2026-07-01
+
+jobs:
+  sanitizers:
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, leak, thread, safestack]
+        include:
+          - sanitizer: memory
+            extra_flags: -Zsanitizer-memory-track-origins
+
+    env:
+      RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} ${{ matrix.extra_flags }}
+      RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }} ${{ matrix.extra_flags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust
+        run: |
+          rustup install ${{ env.NIGHTLY_VERSION }}
+          rustup default ${{ env.NIGHTLY_VERSION }}
+          rustup component add rust-src --toolchain ${{ env.NIGHTLY_VERSION }}
+          rustc --version
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.sanitizer }}
+
+      - name: Test with ${{ matrix.sanitizer }} sanitizer
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu

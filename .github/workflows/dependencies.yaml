@@ -1,0 +1,37 @@
+name: Dependencies Check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies_check:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+    - name: Install Rust
+      run: |
+        rustup install stable
+        rustup default stable
+
+    - name: Cache Rust build
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+    - name: Install Tools
+      run: |
+        cargo --version
+        # ~/.cargo/bin is cached, so this only compiles on a cache miss
+        which cargo-machete || cargo install cargo-machete
+
+    - name: Run cargo machete
+      run: |
+        cargo machete
