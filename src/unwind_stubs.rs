@@ -6,7 +6,7 @@
 
 use core::ffi::c_void;
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 unsafe extern "C" fn _Unwind_Backtrace(
     _trace: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32>,
     _arg: *mut c_void,
@@ -14,17 +14,17 @@ unsafe extern "C" fn _Unwind_Backtrace(
     0
 }
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 unsafe extern "C" fn _Unwind_GetIP(_ctx: *mut c_void) -> usize {
     0
 }
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 unsafe extern "C" fn _Unwind_GetCFA(_ctx: *mut c_void) -> usize {
     0
 }
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 unsafe extern "C" fn _Unwind_FindEnclosingFunction(_pc: *mut c_void) -> *mut c_void {
     core::ptr::null_mut()
 }
