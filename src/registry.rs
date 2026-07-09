@@ -176,7 +176,7 @@ impl DeviceRegistry {
                     dev.last_contact.elapsed() >= online_interval
                         && dev
                             .last_ping_attempt
-                            .is_none_or(|t| t.elapsed() >= online_interval)
+                            .map_or(true, |t| t.elapsed() >= online_interval)
                 }
                 Some(false) => {
                     let within_window = dev
@@ -185,7 +185,7 @@ impl DeviceRegistry {
                     within_window
                         && dev
                             .last_ping_attempt
-                            .is_none_or(|t| t.elapsed() >= offline_interval)
+                            .map_or(true, |t| t.elapsed() >= offline_interval)
                 }
                 None => false,
             };
