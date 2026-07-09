@@ -15,6 +15,7 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 - [Target hardware](#target-hardware)
 - [Development setup](#development-setup-one-time)
 - [Build](#build)
+- [Test coverage](#test-coverage)
 - [MIPS cross-compilation notes](#mips-cross-compilation-notes)
 - [Usage](#usage)
 - [IPC sockets](#ipc-sockets)
@@ -117,6 +118,24 @@ The `[profile.release]` in `Cargo.toml` includes `panic = "abort"`. With this se
 - **Panic behaviour**: a panic still prints its message to stderr, then calls `abort()`. The process terminates and systemd restarts it — the same outcome as an unwinding panic for this service.
 - **No per-frame cleanup on panic**: `Drop` implementations are not called for locals on the panicking call stack. For this service the practical consequences are benign: file descriptors are closed by the OS, and the atomic-write pattern (write to `.tmp` → rename) ensures persistence files are never left in a corrupt state.
 - **Tokio task isolation**: tokio uses `catch_unwind` internally to isolate panicking tasks. With `panic = "abort"`, that catch is bypassed and a panic in any task kills the whole process. This matches the existing design intent — the `tokio::select!` in `main` already brings down the process on any task error.
+
+---
+
+## Test coverage
+
+Coverage is measured with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov). One-time setup:
+
+```bash
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+```
+
+Run the test suite with coverage instrumentation:
+
+```bash
+cargo llvm-cov            # per-file summary table in the terminal
+cargo llvm-cov --open     # HTML report with line-by-line annotations, opens in browser
+```
 
 ---
 
