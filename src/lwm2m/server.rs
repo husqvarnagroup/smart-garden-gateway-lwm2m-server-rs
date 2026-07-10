@@ -21,6 +21,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tower::{util::BoxService, Service, ServiceBuilder};
+use tower_resilience_cache::{CacheError, CacheLayer, EvictionPolicy};
 use tower_resilience_coalesce::{CoalesceError, CoalesceLayer};
 use tower_resilience_retry::{ExponentialRandomBackoff, RetryLayer};
 use tracing::{debug, error, info, warn};
@@ -91,6 +92,12 @@ impl From<CoalesceError<ServerError>> for ServerError {
     }
 }
 
+impl From<CacheError<ServerError>> for ServerError {
+    fn from(e: CacheError<ServerError>) -> Self {
+        e.into_inner()
+    }
+}
+
 /// CoAP deduplication key per RFC 7252 §4.5: (source endpoint, Message ID).
 /// Unparsable packets share MID 0 per peer, which is safe because they all
 /// fail identically.
@@ -152,6 +159,23 @@ fn coap_retry_layer() -> RetryLayer<InboundMessage, Option<OutboundMessage>, Ser
         .build()
 }
 
+/// RFC 7252 §4.8.2 EXCHANGE_LIFETIME: how long a completed CON exchange may
+/// still see retransmissions of the same Message ID.
+const COAP_EXCHANGE_LIFETIME: Duration = Duration::from_secs(247);
+
+/// RFC 7252 §4.5 response cache: replays the stored response for a
+/// retransmitted (peer, MID) instead of re-running the handler. Errors are
+/// not cached; FIFO eviction drops the entries closest to expiry.
+fn coap_cache_layer() -> CacheLayer<InboundMessage, DedupKey> {
+    CacheLayer::builder()
+        .name("coap-dedup-cache")
+        .max_size(1024)
+        .ttl(COAP_EXCHANGE_LIFETIME)
+        .eviction_policy(EvictionPolicy::Fifo)
+        .key_extractor(coap_dedup_key)
+        .build()
+}
+
 /// Singleflight per (peer, MID): a duplicate CON arriving while the original
 /// is still being handled waits for the leader's result instead of running
 /// the handler again (RFC 7252 §4.5).
@@ -167,6 +191,8 @@ fn coap_service(
 ) -> BoxService<InboundMessage, Option<OutboundMessage>, ServerError> {
     ServiceBuilder::new()
         .boxed()
+        .map_err(ServerError::from)
+        .layer(coap_cache_layer())
         .map_err(ServerError::from)
         .layer(coap_coalesce_layer())
         .layer(coap_retry_layer())
@@ -1714,5 +1740,75 @@ mod tests {
         assert!(leader.await.unwrap().is_ok());
         assert!(waiter.await.unwrap().is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // Cache-layer tests exercise the production layer with service_fn mocks.
+
+    #[test]
+    fn cache_error_mapping() {
+        let e: ServerError = CacheError::Inner(ServerError::CoapParsing).into();
+        assert!(matches!(e, ServerError::CoapParsing));
+    }
+
+    #[tokio::test]
+    async fn cache_hit_does_not_call_service_again() {
+        let (inner, calls) = counted_service(|_| Ok(None));
+        let mut svc = coap_cache_layer().layer(inner);
+        let msg = coalesce_msg("10.0.0.1:5683", 0x0001);
+
+        svc.ready().await.unwrap().call(msg.clone()).await.unwrap();
+        svc.ready().await.unwrap().call(msg).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_distinct_keys_each_call_service() {
+        let (inner, calls) = counted_service(|_| Ok(None));
+        let mut svc = coap_cache_layer().layer(inner);
+
+        for msg in [
+            coalesce_msg("10.0.0.1:5683", 0x0001),
+            coalesce_msg("10.0.0.1:5683", 0x0002),
+            coalesce_msg("10.0.0.2:5683", 0x0001),
+        ] {
+            svc.ready().await.unwrap().call(msg).await.unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn cache_errors_are_not_cached() {
+        let (inner, calls) = counted_service(|_| Err(ServerError::CoapParsing));
+        let mut svc = coap_cache_layer().layer(inner);
+        let msg = coalesce_msg("10.0.0.1:5683", 0xABCD);
+
+        let _ = svc.ready().await.unwrap().call(msg.clone()).await;
+        let _ = svc.ready().await.unwrap().call(msg).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_entry_expires_after_ttl() {
+        let (inner, calls) = counted_service(|_| Ok(None));
+        let short_ttl = CacheLayer::<InboundMessage, DedupKey>::builder()
+            .max_size(16)
+            .ttl(Duration::from_millis(50))
+            .eviction_policy(EvictionPolicy::Fifo)
+            .key_extractor(coap_dedup_key)
+            .build();
+        let mut svc = short_ttl.layer(inner);
+        let msg = coalesce_msg("10.0.0.1:5683", 0xFACE);
+
+        svc.ready().await.unwrap().call(msg.clone()).await.unwrap();
+        svc.ready().await.unwrap().call(msg.clone()).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        svc.ready().await.unwrap().call(msg).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
