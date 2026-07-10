@@ -32,6 +32,8 @@ tokio          = { version = "1", features = ["net", "time", "sync", "rt-multi-t
 tokio-util     = { version = "0.7", features = ["rt"] }
 tower          = { version = "0.5", features = ["util"] }
 # 0.9.x: last series supporting Rust 1.75 (0.10 needs 1.85)
+# coalesce held back at 0.9.3: 0.9.4 pulls hashbrown 0.17 which needs Rust 1.85
+tower-resilience-coalesce = "=0.9.3"
 tower-resilience-retry = "0.9.4"
 tracing        = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
