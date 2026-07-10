@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 tempfile = "=3.24.0" # held back for Rust 1.75.0
+# test-util enables tokio::time::pause() / start_paused for fast retry tests
+tokio = { version = "1", features = ["test-util"] }
 
 [dependencies]
 aes            = "0.8"
@@ -29,6 +31,8 @@ thiserror      = "1"
 tokio          = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "macros", "signal", "io-util"] }
 tokio-util     = { version = "0.7", features = ["rt"] }
 tower          = { version = "0.5", features = ["util"] }
+# 0.9.x: last series supporting Rust 1.75 (0.10 needs 1.85)
+tower-resilience-retry = "0.9.4"
 tracing        = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x509-cert      = { version = "0.2", default-features = false }

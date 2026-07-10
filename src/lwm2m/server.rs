@@ -21,6 +21,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tower::{util::BoxService, Service, ServiceBuilder};
+use tower_resilience_retry::{ExponentialRandomBackoff, RetryLayer};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -109,11 +110,27 @@ impl Service<InboundMessage> for MessageHandler {
     }
 }
 
+/// Retry of transient handler errors, paced like CoAP retransmissions
+/// (RFC 7252 §4.2/§4.8: MAX_RETRANSMIT=4, ACK_TIMEOUT=2 s, randomised backoff).
+/// Parse errors are permanent and returned immediately.
+fn coap_retry_layer() -> RetryLayer<InboundMessage, Option<OutboundMessage>, ServerError> {
+    RetryLayer::builder()
+        .name("coap-request")
+        .max_attempts(MAX_RETRANSMIT as usize + 1)
+        .backoff(ExponentialRandomBackoff::new(
+            Duration::from_secs(ACK_TIMEOUT_SECS),
+            0.25,
+        ))
+        .retry_on(|err: &ServerError| !matches!(err, ServerError::CoapParsing))
+        .build()
+}
+
 fn coap_service(
     ctx: ServerCtx,
 ) -> BoxService<InboundMessage, Option<OutboundMessage>, ServerError> {
     ServiceBuilder::new()
         .boxed()
+        .layer(coap_retry_layer())
         .service(MessageHandler::new(ctx))
 }
 
@@ -1481,5 +1498,95 @@ mod tests {
             .unwrap();
 
         assert!(response.is_none());
+    }
+
+    // Retry-layer tests run against the production retry configuration with a
+    // service_fn mock; start_paused lets Tokio skip the backoff sleeps.
+
+    use std::sync::atomic::AtomicUsize;
+    use tower::{Layer as _, ServiceExt as _};
+
+    fn counted_service<F>(
+        f: F,
+    ) -> (
+        impl Service<
+                InboundMessage,
+                Response = Option<OutboundMessage>,
+                Error = ServerError,
+                Future = impl Send,
+            > + Clone,
+        Arc<AtomicUsize>,
+    )
+    where
+        F: Fn(usize) -> std::result::Result<Option<OutboundMessage>, ServerError>
+            + Clone
+            + Send
+            + 'static,
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&calls);
+        let svc = tower::service_fn(move |_msg: InboundMessage| {
+            let f = f.clone();
+            let attempt = c.fetch_add(1, Ordering::SeqCst);
+            async move { f(attempt) }
+        });
+        (svc, calls)
+    }
+
+    fn retry_msg() -> InboundMessage {
+        InboundMessage {
+            addr: peer(),
+            bytes: vec![0x40, 0x01, 0x00, 0x01],
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_parse_error_is_not_retried() {
+        let (inner, calls) = counted_service(|_| Err(ServerError::CoapParsing));
+        let mut svc = coap_retry_layer().layer(inner);
+
+        let result = svc.ready().await.unwrap().call(retry_msg()).await;
+
+        assert!(matches!(result, Err(ServerError::CoapParsing)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_transient_error_retries_until_success() {
+        let (inner, calls) = counted_service(|attempt| {
+            if attempt < 2 {
+                Err(ServerError::Handler("transient".into()))
+            } else {
+                Ok(None)
+            }
+        });
+        let mut svc = coap_retry_layer().layer(inner);
+
+        let result = svc.ready().await.unwrap().call(retry_msg()).await;
+
+        assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_transient_error_exhausts_all_attempts() {
+        let (inner, calls) = counted_service(|_| Err(ServerError::Handler("transient".into())));
+        let mut svc = coap_retry_layer().layer(inner);
+
+        let result = svc.ready().await.unwrap().call(retry_msg()).await;
+
+        assert!(matches!(result, Err(ServerError::Handler(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_RETRANSMIT as usize + 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_success_on_first_attempt_does_not_retry() {
+        let (inner, calls) = counted_service(|_| Ok(None));
+        let mut svc = coap_retry_layer().layer(inner);
+
+        let result = svc.ready().await.unwrap().call(retry_msg()).await;
+
+        assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
