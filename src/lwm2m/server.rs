@@ -21,6 +21,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tower::{util::BoxService, Service, ServiceBuilder};
+use tower_resilience_coalesce::{CoalesceError, CoalesceLayer};
 use tower_resilience_retry::{ExponentialRandomBackoff, RetryLayer};
 use tracing::{debug, error, info, warn};
 
@@ -74,6 +75,32 @@ pub enum ServerError {
     /// Transient handler failure; may succeed on retry.
     #[error("{0}")]
     Handler(String),
+    #[error("Coalesced request was cancelled")]
+    CoalesceLeaderCancelled,
+    #[error("Coalesce failed to receive leader result")]
+    CoalesceRecv,
+}
+
+impl From<CoalesceError<ServerError>> for ServerError {
+    fn from(e: CoalesceError<ServerError>) -> Self {
+        match e {
+            CoalesceError::Service(inner) => inner,
+            CoalesceError::LeaderCancelled => ServerError::CoalesceLeaderCancelled,
+            CoalesceError::RecvError => ServerError::CoalesceRecv,
+        }
+    }
+}
+
+/// CoAP deduplication key per RFC 7252 §4.5: (source endpoint, Message ID).
+/// Unparsable packets share MID 0 per peer, which is safe because they all
+/// fail identically.
+type DedupKey = (SocketAddr, u16);
+
+fn coap_dedup_key(msg: &InboundMessage) -> DedupKey {
+    let mid = Packet::from_bytes(&msg.bytes)
+        .map(|p| p.header.message_id)
+        .unwrap_or(0);
+    (msg.addr, mid)
 }
 
 /// Tower service that parses an incoming datagram, runs the matching LwM2M
@@ -125,11 +152,23 @@ fn coap_retry_layer() -> RetryLayer<InboundMessage, Option<OutboundMessage>, Ser
         .build()
 }
 
+/// Singleflight per (peer, MID): a duplicate CON arriving while the original
+/// is still being handled waits for the leader's result instead of running
+/// the handler again (RFC 7252 §4.5).
+fn coap_coalesce_layer() -> CoalesceLayer<DedupKey, InboundMessage, fn(&InboundMessage) -> DedupKey>
+{
+    CoalesceLayer::builder(coap_dedup_key as fn(&InboundMessage) -> DedupKey)
+        .name("coap-coalesce")
+        .build()
+}
+
 fn coap_service(
     ctx: ServerCtx,
 ) -> BoxService<InboundMessage, Option<OutboundMessage>, ServerError> {
     ServiceBuilder::new()
         .boxed()
+        .map_err(ServerError::from)
+        .layer(coap_coalesce_layer())
         .layer(coap_retry_layer())
         .service(MessageHandler::new(ctx))
 }
@@ -1587,6 +1626,93 @@ mod tests {
         let result = svc.ready().await.unwrap().call(retry_msg()).await;
 
         assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // Coalesce-layer tests exercise the production layer with service_fn mocks.
+
+    fn coalesce_msg(peer: &str, mid: u16) -> InboundMessage {
+        InboundMessage {
+            addr: peer.parse().unwrap(),
+            bytes: vec![0x40, 0x01, (mid >> 8) as u8, (mid & 0xFF) as u8],
+        }
+    }
+
+    #[test]
+    fn coalesce_error_mapping() {
+        assert!(matches!(
+            ServerError::from(CoalesceError::Service(ServerError::CoapParsing)),
+            ServerError::CoapParsing
+        ));
+        assert!(matches!(
+            ServerError::from(CoalesceError::<ServerError>::LeaderCancelled),
+            ServerError::CoalesceLeaderCancelled
+        ));
+        assert!(matches!(
+            ServerError::from(CoalesceError::<ServerError>::RecvError),
+            ServerError::CoalesceRecv
+        ));
+    }
+
+    #[tokio::test]
+    async fn coalesce_distinct_keys_not_coalesced() {
+        let (inner, calls) = counted_service(|_| Ok(None));
+        let mut svc = coap_coalesce_layer().layer(inner);
+
+        for msg in [
+            coalesce_msg("10.0.0.1:1234", 0x0001),
+            coalesce_msg("10.0.0.1:1234", 0x0002),
+            coalesce_msg("10.0.0.2:1234", 0x0001),
+        ] {
+            svc.ready().await.unwrap().call(msg).await.unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn coalesce_concurrent_duplicates_invoke_service_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&calls);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let n = Arc::clone(&notify);
+
+        // The leader blocks until notified so the duplicate can join it.
+        let inner = tower::service_fn(move |_msg: InboundMessage| {
+            let c = Arc::clone(&c);
+            let n = Arc::clone(&n);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                n.notified().await;
+                Ok::<Option<OutboundMessage>, ServerError>(None)
+            }
+        });
+
+        let svc = coap_coalesce_layer().layer(inner);
+        let mut svc1 = svc.clone();
+        let mut svc2 = svc.clone();
+
+        let leader = tokio::spawn(async move {
+            svc1.ready()
+                .await
+                .unwrap()
+                .call(coalesce_msg("10.0.0.1:1234", 0xBEEF))
+                .await
+        });
+        tokio::task::yield_now().await;
+        let waiter = tokio::spawn(async move {
+            svc2.ready()
+                .await
+                .unwrap()
+                .call(coalesce_msg("10.0.0.1:1234", 0xBEEF))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        notify.notify_one();
+
+        assert!(leader.await.unwrap().is_ok());
+        assert!(waiter.await.unwrap().is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
