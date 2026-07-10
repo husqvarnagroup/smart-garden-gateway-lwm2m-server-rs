@@ -39,9 +39,7 @@ def _free_udp_port() -> int:
         return sock.getsockname()[1]
 
 
-def _wait_for_startup(
-    process: subprocess.Popen, log_file: Path, impl
-) -> None:
+def _wait_for_startup(process: subprocess.Popen, log_file: Path, impl) -> None:
     deadline = time.monotonic() + impl.startup_timeout
     while time.monotonic() < deadline:
         logs = log_file.read_text() if log_file.exists() else ""
