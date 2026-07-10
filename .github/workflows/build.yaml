@@ -69,6 +69,10 @@ jobs:
         cargo fmt --version
         cargo fmt --all -- --check
 
+    # Needed by the Python hooks in the pre-commit config
+    - name: Install uv
+      uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
     # The clippy hook reuses the build artifacts from the Clippy step above,
     # so this only re-checks formatting on top of the steps above and ensures that
     # pre-commit works as expected.
