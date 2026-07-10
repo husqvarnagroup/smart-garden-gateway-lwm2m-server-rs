@@ -1,9 +1,12 @@
 use std::{
+    future::Future,
     net::SocketAddr,
+    pin::Pin,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -14,8 +17,10 @@ use rand_core::RngCore;
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, oneshot},
+    task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
+use tower::{util::BoxService, Service, ServiceBuilder};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -44,6 +49,74 @@ const MAX_PACKET: usize = 1500;
 const MAX_RETRANSMIT: u8 = 4;
 const ACK_TIMEOUT_SECS: u64 = 2;
 
+/// A datagram received from a device.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct InboundMessage {
+    pub addr: SocketAddr,
+    pub bytes: Vec<u8>,
+}
+
+/// A response datagram and the traffic class it must be sent with.
+#[derive(Clone)]
+pub struct OutboundMessage {
+    pub addr: SocketAddr,
+    pub bytes: Vec<u8>,
+    pub encrypted: bool,
+}
+
+/// Errors produced by the CoAP message-handling service.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ServerError {
+    /// Permanent: the bytes are not a valid CoAP packet.
+    #[error("CoAP parsing error")]
+    CoapParsing,
+    /// Transient handler failure; may succeed on retry.
+    #[error("{0}")]
+    Handler(String),
+}
+
+/// Tower service that parses an incoming datagram, runs the matching LwM2M
+/// handler and returns the response to send back (if any).
+#[derive(Clone)]
+pub struct MessageHandler {
+    ctx: ServerCtx,
+}
+
+impl MessageHandler {
+    pub fn new(ctx: ServerCtx) -> Self {
+        Self { ctx }
+    }
+}
+
+impl Service<InboundMessage> for MessageHandler {
+    type Response = Option<OutboundMessage>;
+    type Error = ServerError;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, msg: InboundMessage) -> Self::Future {
+        let ctx = self.ctx.clone();
+        Box::pin(async move {
+            let packet = Packet::from_bytes(&msg.bytes).map_err(|_| ServerError::CoapParsing)?;
+            handle_packet(packet, msg.addr, &ctx)
+                .await
+                .map_err(|e| ServerError::Handler(e.to_string()))
+        })
+    }
+}
+
+fn coap_service(
+    ctx: ServerCtx,
+) -> BoxService<InboundMessage, Option<OutboundMessage>, ServerError> {
+    ServiceBuilder::new()
+        .boxed()
+        .service(MessageHandler::new(ctx))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     socket: Arc<UdpSocket>,
@@ -56,32 +129,50 @@ pub async fn run(
     block_acks: BlockAckMap,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let mut service = coap_service(ServerCtx {
+        socket: socket.clone(),
+        registry,
+        bootstrap_registry,
+        coap_dispatch_tx,
+        event_sender,
+        ipso,
+        persistence,
+        block_acks,
+    });
+
     let mut buf = vec![0u8; MAX_PACKET];
+    // Packets are handled concurrently so a slow handler cannot stall the
+    // receive loop.
+    let mut tasks: JoinSet<std::result::Result<Option<OutboundMessage>, ServerError>> =
+        JoinSet::new();
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                tracing::info!("CoAP server shutting down");
+                info!("CoAP server shutting down");
                 return Ok(());
             }
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, addr)) => {
-                        tracing::debug!(%addr, bytes = len, "CoAP packet received");
-                        let ctx = ServerCtx {
-                            socket: &socket,
-                            registry: &registry,
-                            bootstrap_registry: &bootstrap_registry,
-                            coap_dispatch_tx: &coap_dispatch_tx,
-                            event_sender: &event_sender,
-                            ipso: &ipso,
-                            persistence: &persistence,
-                            block_acks: &block_acks,
-                        };
-                        if let Err(e) = handle_packet(&buf[..len], addr, &ctx).await {
-                            warn!(%addr, "Error handling CoAP packet: {e}");
-                        }
+                        debug!(%addr, bytes = len, "CoAP packet received");
+                        tasks.spawn(service.call(InboundMessage {
+                            addr,
+                            bytes: buf[..len].to_vec(),
+                        }));
                     }
                     Err(e) => error!("UDP recv error: {e}"),
+                }
+            }
+            Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                match joined {
+                    Ok(Ok(Some(response))) => {
+                        if let Err(e) = send_response(&socket, &response).await {
+                            warn!(addr = %response.addr, "Error sending CoAP response: {e}");
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(e)) => warn!("Error handling CoAP packet: {e}"),
+                    Err(e) => error!("CoAP handler task failed: {e}"),
                 }
             }
         }
@@ -95,20 +186,31 @@ pub struct DispatchRequest {
 }
 
 /// Shared server state threaded through packet handlers.
-struct ServerCtx<'a> {
-    socket: &'a Arc<UdpSocket>,
-    registry: &'a DeviceRegistry,
-    bootstrap_registry: &'a BootstrapRegistry,
-    coap_dispatch_tx: &'a mpsc::Sender<DispatchRequest>,
-    event_sender: &'a EventSender,
-    ipso: &'a SharedIpso,
-    persistence: &'a Arc<PersistenceStore>,
-    block_acks: &'a BlockAckMap,
+#[derive(Clone)]
+pub struct ServerCtx {
+    socket: Arc<UdpSocket>,
+    registry: DeviceRegistry,
+    bootstrap_registry: BootstrapRegistry,
+    coap_dispatch_tx: mpsc::Sender<DispatchRequest>,
+    event_sender: EventSender,
+    ipso: SharedIpso,
+    persistence: Arc<PersistenceStore>,
+    block_acks: BlockAckMap,
 }
 
-async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
-    let packet =
-        Packet::from_bytes(data).map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
+async fn send_response(socket: &UdpSocket, response: &OutboundMessage) -> Result<()> {
+    if response.encrypted {
+        send_encrypted_packet(socket, &response.bytes, response.addr).await
+    } else {
+        send_bootstrap_packet(socket, &response.bytes, response.addr).await
+    }
+}
+
+async fn handle_packet(
+    packet: Packet,
+    addr: SocketAddr,
+    ctx: &ServerCtx,
+) -> Result<Option<OutboundMessage>> {
     debug!(%addr, coap = %super::coap_summary(&packet), "CoAP rx");
 
     if let Some(endpoint) = ctx.registry.touch(addr).await {
@@ -120,10 +222,10 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
         // Device initiating a request to the server (registration, update).
         MessageType::Confirmable | MessageType::NonConfirmable => match packet.header.code {
             MessageClass::Request(Method::Post) => {
-                handle_post(packet, addr, ctx).await?;
+                return handle_post(packet, addr, ctx).await;
             }
             MessageClass::Request(Method::Delete) => {
-                handle_delete(packet, addr, ctx).await?;
+                return handle_delete(packet, addr, ctx).await;
             }
             other => {
                 warn!(%addr, ?other, "Unexpected CoAP request method");
@@ -134,9 +236,9 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
             handle_ack(
                 packet,
                 addr,
-                ctx.registry,
-                ctx.bootstrap_registry,
-                ctx.block_acks,
+                &ctx.registry,
+                &ctx.bootstrap_registry,
+                &ctx.block_acks,
             )
             .await?;
         }
@@ -163,10 +265,14 @@ async fn handle_packet(data: &[u8], addr: SocketAddr, ctx: &ServerCtx<'_>) -> Re
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
-async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
+async fn handle_post(
+    packet: Packet,
+    addr: SocketAddr,
+    ctx: &ServerCtx,
+) -> Result<Option<OutboundMessage>> {
     let path = uri_path(&packet);
     let path_parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
 
@@ -176,29 +282,28 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
             handle_bootstrap(
                 packet,
                 addr,
-                ctx.socket,
-                ctx.bootstrap_registry,
-                ctx.event_sender,
-                ctx.persistence,
+                &ctx.socket,
+                &ctx.bootstrap_registry,
+                &ctx.event_sender,
+                &ctx.persistence,
             )
-            .await?;
+            .await
         }
         // POST /rd?ep=<name>&lt=<lifetime>&b=U  — new registration
         [p] if *p == RD_PATH => {
             handle_registration(
                 packet,
                 addr,
-                ctx.socket,
-                ctx.registry,
-                ctx.bootstrap_registry,
-                ctx.coap_dispatch_tx,
-                ctx.persistence,
+                &ctx.registry,
+                &ctx.bootstrap_registry,
+                &ctx.coap_dispatch_tx,
+                &ctx.persistence,
             )
-            .await?;
+            .await
         }
         // POST /rd/<id>  — registration update (heartbeat)
         [p, _id] if *p == RD_PATH => {
-            handle_update(packet, addr, ctx.socket, ctx.registry, ctx.coap_dispatch_tx).await?;
+            handle_update(packet, addr, &ctx.registry, &ctx.coap_dispatch_tx).await
         }
         // POST /dp  — device data push (SenML+CBOR state report after registration)
         [p] if *p == DP_PATH => {
@@ -206,28 +311,35 @@ async fn handle_post(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> R
             handle_dp(
                 packet,
                 addr,
-                ctx.socket,
-                ctx.registry,
-                ctx.event_sender,
+                &ctx.registry,
+                &ctx.event_sender,
                 &ipso,
-                ctx.persistence,
+                &ctx.persistence,
             )
-            .await?;
+            .await
         }
         _ => {
             warn!(%addr, path, "POST to unknown path");
-            send_encrypted_response(ctx.socket, addr, &packet, Status::NotFound, None).await?;
+            Ok(Some(encrypted_response(
+                addr,
+                &packet,
+                Status::NotFound,
+                None,
+            )?))
         }
     }
-    Ok(())
 }
 
-async fn handle_delete(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) -> Result<()> {
-    send_encrypted_response(ctx.socket, addr, &packet, Status::Deleted, None).await?;
+async fn handle_delete(
+    packet: Packet,
+    addr: SocketAddr,
+    ctx: &ServerCtx,
+) -> Result<Option<OutboundMessage>> {
+    let response = encrypted_response(addr, &packet, Status::Deleted, None)?;
 
     let Some(endpoint) = ctx.registry.remove_by_addr(addr).await else {
         warn!(%addr, "DELETE from unknown device, ignoring");
-        return Ok(());
+        return Ok(Some(response));
     };
 
     // A device-initiated DELETE means the device is going offline temporarily (e.g. firmware
@@ -237,12 +349,12 @@ async fn handle_delete(packet: Packet, addr: SocketAddr, ctx: &ServerCtx<'_>) ->
     info!(device = %endpoint, activity = "registration", "Device deregistered");
 
     let snapshots = ctx.registry.snapshot().await;
-    let ps = Arc::clone(ctx.persistence);
+    let ps = Arc::clone(&ctx.persistence);
     tokio::spawn(async move {
         let _ = tokio::task::spawn_blocking(move || ps.save_registry(&snapshots)).await;
     });
 
-    Ok(())
+    Ok(Some(response))
 }
 
 async fn handle_bootstrap(
@@ -252,7 +364,7 @@ async fn handle_bootstrap(
     bootstrap_registry: &BootstrapRegistry,
     event_sender: &EventSender,
     persistence: &Arc<PersistenceStore>,
-) -> Result<()> {
+) -> Result<Option<OutboundMessage>> {
     let query = uri_query(&packet);
     let params = parse_query(&query);
 
@@ -260,9 +372,12 @@ async fn handle_bootstrap(
     let endpoint = super::sgtin_from_ep(ep_raw).to_owned();
     if endpoint.is_empty() {
         warn!(%addr, "Bootstrap request missing ep parameter");
-        let bytes = make_response_bytes(&packet, Status::BadRequest, None)?;
-        send_bootstrap_packet(socket, &bytes, addr).await?;
-        return Ok(());
+        return Ok(Some(plain_response(
+            addr,
+            &packet,
+            Status::BadRequest,
+            None,
+        )?));
     }
 
     // Every /bs gets an event — assign a stable ID first.
@@ -271,6 +386,7 @@ async fn handle_bootstrap(
     info!(device = %endpoint, id, %addr, activity = "inclusion", "Received device inclusion request");
 
     // Case 1: user has approved — ACK, consume approval, start write phase.
+    // The ACK is sent inline so it reaches the device before the first write.
     if bootstrap_registry.is_approved(&endpoint).await {
         bootstrap_registry.consume_approval(&endpoint).await;
         let bytes = make_response_bytes(&packet, Status::Changed, None)?;
@@ -279,7 +395,7 @@ async fn handle_bootstrap(
 
         let Some(server_uri) = bootstrap_registry.server_uri().map(str::to_owned) else {
             warn!(device = %endpoint, activity = "inclusion", "Bootstrap: SERVER_URI not configured — skipping write phase");
-            return Ok(());
+            return Ok(None);
         };
 
         let socket_c = socket.clone();
@@ -309,14 +425,14 @@ async fn handle_bootstrap(
                 }
             }
         });
-        return Ok(());
+        return Ok(None);
     }
 
     // Case 2: cert not yet cached — start GET /0/0 if not already in flight.
     if !bootstrap_registry.has_cert(&endpoint).await {
         let Some((token, mid)) = bootstrap_registry.begin(endpoint.clone(), addr).await else {
             info!(device = %endpoint, activity = "inclusion", "Bootstrap: GET /0/0 already in flight");
-            return Ok(());
+            return Ok(None);
         };
         info!(device = %endpoint, activity = "inclusion", "Device needs authentication");
 
@@ -340,7 +456,7 @@ async fn handle_bootstrap(
     }
     // else: cert cached, awaiting user approval — event already emitted, nothing more to do.
 
-    Ok(())
+    Ok(None)
 }
 
 fn make_response_bytes(
@@ -381,26 +497,42 @@ async fn send_encrypted_packet(socket: &UdpSocket, bytes: &[u8], addr: SocketAdd
     Ok(())
 }
 
-async fn send_encrypted_response(
-    socket: &UdpSocket,
+/// Build a response to `request` that is sent with MAC-layer encryption.
+fn encrypted_response(
     addr: SocketAddr,
     request: &Packet,
     status: Status,
     payload: Option<Vec<u8>>,
-) -> Result<()> {
-    let bytes = make_response_bytes(request, status, payload)?;
-    send_encrypted_packet(socket, &bytes, addr).await
+) -> Result<OutboundMessage> {
+    Ok(OutboundMessage {
+        addr,
+        bytes: make_response_bytes(request, status, payload)?,
+        encrypted: true,
+    })
+}
+
+/// Build a response to `request` that is sent unencrypted (bootstrap phase).
+fn plain_response(
+    addr: SocketAddr,
+    request: &Packet,
+    status: Status,
+    payload: Option<Vec<u8>>,
+) -> Result<OutboundMessage> {
+    Ok(OutboundMessage {
+        addr,
+        bytes: make_response_bytes(request, status, payload)?,
+        encrypted: false,
+    })
 }
 
 async fn handle_registration(
     packet: Packet,
     addr: SocketAddr,
-    socket: &Arc<UdpSocket>,
     registry: &DeviceRegistry,
     bootstrap_registry: &BootstrapRegistry,
     coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
     persistence: &Arc<PersistenceStore>,
-) -> Result<()> {
+) -> Result<Option<OutboundMessage>> {
     let query = uri_query(&packet);
     let params = parse_query(&query);
 
@@ -418,8 +550,12 @@ async fn handle_registration(
 
     if endpoint.is_empty() {
         warn!(%addr, "Registration missing ep parameter");
-        send_encrypted_response(socket, addr, &packet, Status::BadRequest, None).await?;
-        return Ok(());
+        return Ok(Some(encrypted_response(
+            addr,
+            &packet,
+            Status::BadRequest,
+            None,
+        )?));
     }
 
     // Parse link-format body for registered objects and their versions.
@@ -442,11 +578,13 @@ async fn handle_registration(
     let mut response = make_response(&packet, Status::Created);
     response.add_option(CoapOption::LocationPath, b"rd".to_vec());
     response.add_option(CoapOption::LocationPath, id.to_string().into_bytes());
-
-    let bytes = response
-        .to_bytes()
-        .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
-    send_encrypted_packet(socket, &bytes, addr).await?;
+    let response = OutboundMessage {
+        addr,
+        bytes: response
+            .to_bytes()
+            .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?,
+        encrypted: true,
+    };
 
     info!(device = %endpoint, id, %addr, activity = "registration", "Device registered");
 
@@ -480,7 +618,7 @@ async fn handle_registration(
             let _ = tokio::task::spawn_blocking(move || ps.save_registry(&snapshots)).await;
         });
 
-        return Ok(());
+        return Ok(Some(response));
     }
 
     let snapshots = registry.snapshot().await;
@@ -489,17 +627,16 @@ async fn handle_registration(
         let _ = tokio::task::spawn_blocking(move || ps.save_registry(&snapshots)).await;
     });
 
-    Ok(())
+    Ok(Some(response))
 }
 
 async fn handle_update(
     packet: Packet,
     addr: SocketAddr,
-    socket: &Arc<UdpSocket>,
     registry: &DeviceRegistry,
     coap_dispatch_tx: &mpsc::Sender<DispatchRequest>,
-) -> Result<()> {
-    send_encrypted_response(socket, addr, &packet, Status::Changed, None).await?;
+) -> Result<Option<OutboundMessage>> {
+    let response = encrypted_response(addr, &packet, Status::Changed, None)?;
 
     // Always reset the expiry timer; apply a new lifetime if lt= was included.
     let query = uri_query(&packet);
@@ -514,7 +651,7 @@ async fn handle_update(
         info!(%addr, count = ops.len(), "Dispatching pending ops on device update");
         let _ = coap_dispatch_tx.send(DispatchRequest { addr, ops }).await;
     }
-    Ok(())
+    Ok(Some(response))
 }
 
 async fn handle_ack(
@@ -585,21 +722,20 @@ async fn handle_ack(
 async fn handle_dp(
     packet: Packet,
     addr: SocketAddr,
-    socket: &Arc<UdpSocket>,
     registry: &DeviceRegistry,
     event_sender: &EventSender,
     ipso: &IpsoModel,
     persistence: &Arc<PersistenceStore>,
-) -> Result<()> {
-    send_encrypted_response(socket, addr, &packet, Status::Changed, None).await?;
+) -> Result<Option<OutboundMessage>> {
+    let response = encrypted_response(addr, &packet, Status::Changed, None)?;
 
     if packet.payload.is_empty() {
-        return Ok(());
+        return Ok(Some(response));
     }
 
     let Some(endpoint) = registry.endpoint_by_addr(addr).await else {
         warn!(%addr, "Unknown device, ignoring /dp payload");
-        return Ok(());
+        return Ok(Some(response));
     };
 
     let obj_versions = registry
@@ -660,7 +796,7 @@ async fn handle_dp(
         }
     }
 
-    Ok(())
+    Ok(Some(response))
 }
 
 // ── SenML+CBOR → event payload ────────────────────────────────────────────────
@@ -1204,4 +1340,146 @@ fn token_array(token: &[u8]) -> [u8; 8] {
     let len = token.len().min(8);
     arr[..len].copy_from_slice(&token[..len]);
     arr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lwm2m::ipso::IpsoModel;
+    use std::sync::RwLock;
+
+    pub(crate) fn registration_packet(mid: u16) -> Vec<u8> {
+        let mut pkt = Packet::new();
+        pkt.header.set_type(MessageType::Confirmable);
+        pkt.header.code = MessageClass::Request(Method::Post);
+        pkt.header.message_id = mid;
+        pkt.set_token(vec![0x01]);
+        pkt.add_option(CoapOption::UriPath, b"rd".to_vec());
+        pkt.add_option(CoapOption::UriQuery, b"ep=test-device".to_vec());
+        pkt.add_option(CoapOption::UriQuery, b"lt=3600".to_vec());
+        pkt.add_option(CoapOption::UriQuery, b"b=U".to_vec());
+        pkt.to_bytes().unwrap()
+    }
+
+    pub(crate) async fn test_ctx() -> (
+        ServerCtx,
+        tempfile::TempDir,
+        mpsc::Receiver<DispatchRequest>,
+    ) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let (dispatch_tx, dispatch_rx) = mpsc::channel(8);
+        let ctx = ServerCtx {
+            socket,
+            registry: DeviceRegistry::new(),
+            bootstrap_registry: BootstrapRegistry::new(vec![0u8; 16], Some("coap://[::1]".into())),
+            coap_dispatch_tx: dispatch_tx,
+            event_sender: EventSender::new(),
+            ipso: Arc::new(RwLock::new(Arc::new(IpsoModel::default()))),
+            persistence: Arc::new(PersistenceStore::new(
+                tmp.path().join("persist"),
+                "coap://[::1]",
+            )),
+            block_acks: crate::lwm2m::new_block_ack_map(),
+        };
+        (ctx, tmp, dispatch_rx)
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:5683".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn registration_returns_created_with_location_path() {
+        let (ctx, _tmp, _rx) = test_ctx().await;
+        ctx.bootstrap_registry.mark_included("test-device").await;
+        let mut service = MessageHandler::new(ctx);
+
+        let response = service
+            .call(InboundMessage {
+                addr: peer(),
+                bytes: registration_packet(0x0001),
+            })
+            .await
+            .unwrap()
+            .expect("registration must produce a response");
+
+        assert!(response.encrypted);
+        assert_eq!(response.addr, peer());
+        let pkt = Packet::from_bytes(&response.bytes).unwrap();
+        assert_eq!(pkt.header.get_type(), MessageType::Acknowledgement);
+        assert_eq!(pkt.header.code, MessageClass::Response(Status::Created));
+
+        let location: Vec<String> = pkt
+            .get_option(CoapOption::LocationPath)
+            .map(|list| {
+                list.iter()
+                    .map(|v| String::from_utf8_lossy(v).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(location.first().map(String::as_str), Some("rd"));
+        assert!(location.get(1).is_some());
+    }
+
+    #[tokio::test]
+    async fn post_to_unknown_path_returns_not_found() {
+        let (ctx, _tmp, _rx) = test_ctx().await;
+        let mut service = MessageHandler::new(ctx);
+
+        let mut pkt = Packet::new();
+        pkt.header.set_type(MessageType::Confirmable);
+        pkt.header.code = MessageClass::Request(Method::Post);
+        pkt.header.message_id = 0x0002;
+        pkt.add_option(CoapOption::UriPath, b"nope".to_vec());
+
+        let response = service
+            .call(InboundMessage {
+                addr: peer(),
+                bytes: pkt.to_bytes().unwrap(),
+            })
+            .await
+            .unwrap()
+            .expect("unknown path must produce a response");
+
+        let pkt = Packet::from_bytes(&response.bytes).unwrap();
+        assert_eq!(pkt.header.code, MessageClass::Response(Status::NotFound));
+    }
+
+    #[tokio::test]
+    async fn invalid_bytes_return_parse_error() {
+        let (ctx, _tmp, _rx) = test_ctx().await;
+        let mut service = MessageHandler::new(ctx);
+
+        let result = service
+            .call(InboundMessage {
+                addr: peer(),
+                bytes: vec![0xFF, 0xFE, 0xFD],
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServerError::CoapParsing)));
+    }
+
+    #[tokio::test]
+    async fn spurious_ack_produces_no_response() {
+        let (ctx, _tmp, _rx) = test_ctx().await;
+        let mut service = MessageHandler::new(ctx);
+
+        let mut pkt = Packet::new();
+        pkt.header.set_type(MessageType::Acknowledgement);
+        pkt.header.code = MessageClass::Response(Status::Changed);
+        pkt.header.message_id = 0x0003;
+        pkt.set_token(vec![0xAA, 0xBB]);
+
+        let response = service
+            .call(InboundMessage {
+                addr: peer(),
+                bytes: pkt.to_bytes().unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert!(response.is_none());
+    }
 }

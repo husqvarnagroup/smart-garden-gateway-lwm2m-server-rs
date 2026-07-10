@@ -28,6 +28,7 @@ socket2        = { version = "0.5", features = ["all"] }
 thiserror      = "1"
 tokio          = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "macros", "signal", "io-util"] }
 tokio-util     = { version = "0.7", features = ["rt"] }
+tower          = { version = "0.5", features = ["util"] }
 tracing        = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x509-cert      = { version = "0.2", default-features = false }
