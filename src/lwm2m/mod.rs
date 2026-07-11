@@ -1,3 +1,4 @@
+pub mod block;
 pub mod bootstrap;
 pub mod client;
 pub mod ipso;

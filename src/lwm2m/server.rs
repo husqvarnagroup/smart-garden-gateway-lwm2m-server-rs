@@ -38,7 +38,11 @@ use crate::{
     registry::DeviceRegistry,
 };
 
-use super::{content_format::SENML_CBOR, set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN};
+use super::{
+    block::{block_handler_config, BlockLayer},
+    content_format::SENML_CBOR,
+    set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN,
+};
 
 /// Op-ID counter for server-internal operations (factory reset etc.).
 /// Starts at 0x8000_0000 to stay well clear of IPC op IDs (which begin at 1).
@@ -161,7 +165,7 @@ fn coap_retry_layer() -> RetryLayer<InboundMessage, Option<OutboundMessage>, Ser
 
 /// RFC 7252 §4.8.2 EXCHANGE_LIFETIME: how long a completed CON exchange may
 /// still see retransmissions of the same Message ID.
-const COAP_EXCHANGE_LIFETIME: Duration = Duration::from_secs(247);
+pub(crate) const COAP_EXCHANGE_LIFETIME: Duration = Duration::from_secs(247);
 
 /// RFC 7252 §4.5 response cache: replays the stored response for a
 /// retransmitted (peer, MID) instead of re-running the handler. Errors are
@@ -191,6 +195,7 @@ fn coap_service(
 ) -> BoxService<InboundMessage, Option<OutboundMessage>, ServerError> {
     ServiceBuilder::new()
         .boxed()
+        .layer(BlockLayer::new(block_handler_config()))
         .map_err(ServerError::from)
         .layer(coap_cache_layer())
         .map_err(ServerError::from)
