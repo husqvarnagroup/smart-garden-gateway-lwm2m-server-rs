@@ -49,7 +49,6 @@ sd-notify = "0.4.5"
 # Ignored as that are pinned transitive dependencies
 ignored = ["clap_lex", "getrandom"]
 
-
 [profile.release]
 opt-level     = "z"
 lto           = true

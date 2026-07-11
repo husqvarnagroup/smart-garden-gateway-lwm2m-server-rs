@@ -31,7 +31,12 @@ jobs:
         cargo --version
         # ~/.cargo/bin is cached, so this only compiles on a cache miss
         which cargo-machete || cargo install cargo-machete
+        which cargo-sort || cargo install cargo-sort
 
     - name: Run cargo machete
       run: |
         cargo machete
+
+    - name: Check Cargo.toml ordering
+      run: |
+        cargo sort --grouped --check
