@@ -103,7 +103,7 @@ impl From<CacheError<ServerError>> for ServerError {
 }
 
 /// CoAP deduplication key per RFC 7252 §4.5: (source endpoint, Message ID).
-/// Unparseable packets share MID 0 per peer, which is safe because they all
+/// Unparsable packets share MID 0 per peer, which is safe because they all
 /// fail identically.
 type DedupKey = (SocketAddr, u16);
 
