@@ -210,39 +210,8 @@ impl DeviceRegistry {
         dev.pending_ops.drain(..).collect()
     }
 
-    /// Move an operation to the in-flight map (after it has been sent).
-    pub async fn place_in_flight(&self, addr: SocketAddr, token: [u8; 8], op: PendingOperation) {
-        let mut inner = self.inner.write().await;
-        if let Some(&id) = inner.by_addr.get(&addr) {
-            if let Some(dev) = inner.by_id.get_mut(&id) {
-                dev.in_flight.insert(token, op);
-            }
-        }
-    }
-
-    /// Return true if an in-flight operation with this token is still pending (non-destructive).
-    pub async fn is_in_flight(&self, addr: SocketAddr, token: &[u8; 8]) -> bool {
-        let inner = self.inner.read().await;
-        let Some(id) = inner.by_addr.get(&addr) else {
-            return false;
-        };
-        inner.by_id[id].in_flight.contains_key(token)
-    }
-
-    /// Remove an in-flight operation by token (CoAP response received).
-    /// Returns the op so the caller can fire its response channel.
-    pub async fn complete_in_flight(
-        &self,
-        addr: SocketAddr,
-        token: &[u8; 8],
-    ) -> Option<PendingOperation> {
-        let mut inner = self.inner.write().await;
-        let id = *inner.by_addr.get(&addr)?;
-        inner.by_id.get_mut(&id)?.in_flight.remove(token)
-    }
-
     /// Expire stale device registrations. Returns endpoints that were removed.
-    /// In-flight and pending ops have their response channels fired with Timeout.
+    /// Pending ops have their response channels fired with Timeout.
     pub async fn expire_stale(&self, grace_secs: u32) -> Vec<String> {
         let mut inner = self.inner.write().await;
         let expired: Vec<DeviceId> = inner
@@ -260,9 +229,6 @@ impl DeviceRegistry {
                 inner.by_addr.remove(&dev.addr);
 
                 for op in dev.pending_ops {
-                    let _ = op.response_tx.send(Err(LwM2mError::Timeout));
-                }
-                for (_, op) in dev.in_flight {
                     let _ = op.response_tx.send(Err(LwM2mError::Timeout));
                 }
                 removed.push(dev.endpoint);
@@ -294,26 +260,6 @@ impl DeviceRegistry {
         let inner = self.inner.read().await;
         let id = inner.by_addr.get(&addr)?;
         Some(inner.by_id[id].object_versions.clone())
-    }
-
-    /// Timeout in-flight operations that have exceeded `max_secs`.
-    pub async fn timeout_in_flight(&self, max_secs: u64) {
-        let mut inner = self.inner.write().await;
-        for dev in inner.by_id.values_mut() {
-            let timed_out: Vec<[u8; 8]> = dev
-                .in_flight
-                .iter()
-                .filter(|(_, op)| op.created_at.elapsed().as_secs() > max_secs)
-                .map(|(token, _)| *token)
-                .collect();
-
-            for token in timed_out {
-                if let Some(op) = dev.in_flight.remove(&token) {
-                    warn!(device = %dev.endpoint, op_id = op.id, "In-flight op timed out");
-                    let _ = op.response_tx.send(Err(LwM2mError::Timeout));
-                }
-            }
-        }
     }
 
     /// Snapshot all registered devices for persistence.
@@ -370,7 +316,6 @@ impl DeviceRegistry {
                 offline_since: Some(now),
                 last_ping_attempt: None,
                 pending_ops: std::collections::VecDeque::new(),
-                in_flight: std::collections::HashMap::new(),
             };
             inner.by_endpoint.insert(s.endpoint, s.id);
             inner.by_addr.insert(s.addr, s.id);
@@ -394,7 +339,7 @@ impl DeviceRegistry {
     }
 
     /// Remove a device by socket address. Returns the endpoint name if found.
-    /// In-flight and pending ops have their response channels fired with Timeout.
+    /// Pending ops have their response channels fired with Timeout.
     pub async fn remove_by_addr(&self, addr: SocketAddr) -> Option<String> {
         let mut inner = self.inner.write().await;
         let id = *inner.by_addr.get(&addr)?;
@@ -402,9 +347,6 @@ impl DeviceRegistry {
         inner.by_endpoint.remove(&dev.endpoint);
         inner.by_addr.remove(&addr);
         for op in dev.pending_ops {
-            let _ = op.response_tx.send(Err(LwM2mError::Timeout));
-        }
-        for (_, op) in dev.in_flight {
             let _ = op.response_tx.send(Err(LwM2mError::Timeout));
         }
         Some(dev.endpoint)

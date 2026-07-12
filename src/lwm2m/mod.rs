@@ -18,13 +18,22 @@ use crate::{
     model::{LwM2mError, ResourceValue},
 };
 
-/// Map from CoAP token to a waiting receiver for the next ACK packet.
-/// Used to route intermediate 2.31 Continue ACKs to the block-write task
-/// without involving the in-flight registry.
-pub type BlockAckMap = Arc<Mutex<HashMap<[u8; 8], oneshot::Sender<Packet>>>>;
+/// Map from CoAP token to the exchange awaiting the next ACK packet.
+/// The server's receive loop routes device ACKs to the client service stack
+/// through this map; dropping a sender (RST received) fails the exchange.
+pub type AckMap = Arc<Mutex<HashMap<[u8; 8], oneshot::Sender<Packet>>>>;
 
-pub fn new_block_ack_map() -> BlockAckMap {
+pub fn new_ack_map() -> AckMap {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Copy a CoAP token (≤ 8 bytes on the wire) into the fixed-size key used by
+/// the [`AckMap`] and the registries.
+pub(super) fn token_array(token: &[u8]) -> [u8; 8] {
+    let mut arr = [0u8; 8];
+    let len = token.len().min(8);
+    arr[..len].copy_from_slice(&token[..len]);
+    arr
 }
 
 pub(super) fn response_type_to_class_detail(status: coap_lite::ResponseType) -> (u8, u8) {

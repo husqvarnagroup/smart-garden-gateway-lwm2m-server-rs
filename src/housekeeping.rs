@@ -15,7 +15,6 @@ use crate::{
 };
 
 const GRACE_SECS: u32 = 30;
-const IN_FLIGHT_TIMEOUT_SECS: u64 = 60;
 const INTERVAL_SECS: u64 = 60;
 const BOOTSTRAP_TIMEOUT_SECS: u64 = 30;
 
@@ -48,7 +47,6 @@ pub async fn run(
                 if !expired.is_empty() {
                     warn!(count = expired.len(), endpoints = ?expired, "Expired device registrations purged");
                 }
-                registry.timeout_in_flight(IN_FLIGHT_TIMEOUT_SECS).await;
                 bootstrap_registry.expire_stale(BOOTSTRAP_TIMEOUT_SECS).await;
 
                 let candidates = registry

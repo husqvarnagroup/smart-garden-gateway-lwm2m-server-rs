@@ -79,8 +79,6 @@ pub struct PendingOperation {
     /// Fired after the first 2.31 Continue ACK in a block-wise write.
     /// Set only for FOTA uploads; None for all other operations.
     pub first_ack_tx: Option<oneshot::Sender<LwM2mResult>>,
-    pub created_at: Instant,
-    pub attempts: u8,
 }
 
 impl PendingOperation {
@@ -90,8 +88,6 @@ impl PendingOperation {
             command,
             response_tx,
             first_ack_tx: None,
-            created_at: Instant::now(),
-            attempts: 0,
         }
     }
 }
@@ -148,8 +144,6 @@ pub struct Device {
     pub last_ping_attempt: Option<Instant>,
     /// Operations waiting to be sent on next device contact.
     pub pending_ops: VecDeque<PendingOperation>,
-    /// Operations sent but awaiting CoAP ACK, keyed by 8-byte token.
-    pub in_flight: HashMap<[u8; 8], PendingOperation>,
 }
 
 impl Device {
@@ -182,7 +176,6 @@ impl Device {
             offline_since: None,
             last_ping_attempt: None,
             pending_ops: VecDeque::new(),
-            in_flight: HashMap::new(),
         }
     }
 

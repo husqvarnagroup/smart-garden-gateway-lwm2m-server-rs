@@ -55,7 +55,7 @@ impl TestGateway {
         let dispatch_tx_ipc = dispatch_tx.clone();
         let dispatch_tx_hk = dispatch_tx.clone();
         let cancel = CancellationToken::new();
-        let block_acks = lwm2m::new_block_ack_map();
+        let client_acks = lwm2m::new_ack_map();
         let ipso = Arc::new(RwLock::new(Arc::new(IpsoModel::default())));
 
         let persistence = Arc::new(PersistenceStore::new(
@@ -71,7 +71,7 @@ impl TestGateway {
             event_sender.clone(),
             ipso.clone(),
             persistence,
-            block_acks.clone(),
+            client_acks.clone(),
             cancel.clone(),
         ));
         tokio::spawn(lwm2m::client::run(
@@ -79,7 +79,7 @@ impl TestGateway {
             registry.clone(),
             dispatch_rx,
             event_sender.clone(),
-            block_acks,
+            client_acks,
             cancel.clone(),
         ));
         tokio::spawn(housekeeping::run(

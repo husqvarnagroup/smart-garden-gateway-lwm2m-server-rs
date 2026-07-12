@@ -33,7 +33,7 @@ use crate::{
         bootstrap::{self, BootstrapRegistry},
         ipso::{IpsoModel, SharedIpso},
     },
-    model::{LwM2mCommand, LwM2mError, PendingOperation, FACTORY_RESET_PATH},
+    model::{LwM2mCommand, PendingOperation, FACTORY_RESET_PATH},
     persistence::PersistenceStore,
     registry::DeviceRegistry,
 };
@@ -41,7 +41,7 @@ use crate::{
 use super::{
     block::{block_handler_config, BlockLayer},
     content_format::SENML_CBOR,
-    set_tclass, BlockAckMap, TC_ENCRYPTED, TC_PLAIN,
+    set_tclass, token_array, AckMap, TC_ENCRYPTED, TC_PLAIN,
 };
 
 /// Op-ID counter for server-internal operations (factory reset etc.).
@@ -213,7 +213,7 @@ pub async fn run(
     event_sender: EventSender,
     ipso: SharedIpso,
     persistence: Arc<PersistenceStore>,
-    block_acks: BlockAckMap,
+    client_acks: AckMap,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut service = coap_service(ServerCtx {
@@ -224,7 +224,7 @@ pub async fn run(
         event_sender,
         ipso,
         persistence,
-        block_acks,
+        client_acks,
     });
 
     let mut buf = vec![0u8; MAX_PACKET];
@@ -282,7 +282,7 @@ pub struct ServerCtx {
     event_sender: EventSender,
     ipso: SharedIpso,
     persistence: Arc<PersistenceStore>,
-    block_acks: BlockAckMap,
+    client_acks: AckMap,
 }
 
 async fn send_response(socket: &UdpSocket, response: &OutboundMessage) -> Result<()> {
@@ -320,17 +320,10 @@ async fn handle_packet(
         },
         // Device acknowledging one of our downlink requests.
         MessageType::Acknowledgement => {
-            handle_ack(
-                packet,
-                addr,
-                &ctx.registry,
-                &ctx.bootstrap_registry,
-                &ctx.block_acks,
-            )
-            .await?;
+            handle_ack(packet, &ctx.bootstrap_registry, &ctx.client_acks).await?;
         }
         MessageType::Reset => {
-            // Device rejected our message — treat as error for the in-flight op.
+            // Device rejected our message — fail the waiting exchange.
             let token = token_array(packet.get_token());
             if ctx.bootstrap_registry.is_pending(&token).await {
                 warn!(%addr, "Bootstrap GET /0/0 reset by device");
@@ -341,14 +334,8 @@ async fn handle_packet(
             {
                 warn!(%addr, "Bootstrap write op reset by device");
             } else {
-                // Drop the block-write sender (if any) — signals error to the block task.
-                ctx.block_acks.lock().await.remove(&token);
-                if let Some(op) = ctx.registry.complete_in_flight(addr, &token).await {
-                    let _ = op.response_tx.send(Err(LwM2mError::CoapError {
-                        class: 5,
-                        detail: 0,
-                    }));
-                }
+                // Drop the sender — the client service stack reports Reset.
+                ctx.client_acks.lock().await.remove(&token);
             }
         }
     }
@@ -743,10 +730,8 @@ async fn handle_update(
 
 async fn handle_ack(
     packet: Packet,
-    addr: SocketAddr,
-    registry: &DeviceRegistry,
     bootstrap_registry: &BootstrapRegistry,
-    block_acks: &BlockAckMap,
+    client_acks: &AckMap,
 ) -> Result<()> {
     let token = token_array(packet.get_token());
 
@@ -789,18 +774,12 @@ async fn handle_ack(
         return Ok(());
     }
 
-    // Block-wise transfer ACK (2.31 Continue or final response for block writes).
-    if let Some(tx) = block_acks.lock().await.remove(&token) {
+    // Route the ACK to the client exchange awaiting it (normal ops and
+    // block-write blocks alike). Spurious or duplicate ACKs find no entry
+    // and are ignored.
+    if let Some(tx) = client_acks.lock().await.remove(&token) {
         let _ = tx.send(packet);
-        return Ok(());
     }
-
-    let Some(op) = registry.complete_in_flight(addr, &token).await else {
-        // Spurious or duplicate ACK — ignore.
-        return Ok(());
-    };
-
-    let _ = op.response_tx.send(super::coap_response_to_result(&packet));
     Ok(())
 }
 
@@ -1422,13 +1401,6 @@ fn format_resource_value(val: &serde_json::Value) -> String {
     val.to_string()
 }
 
-fn token_array(token: &[u8]) -> [u8; 8] {
-    let mut arr = [0u8; 8];
-    let len = token.len().min(8);
-    arr[..len].copy_from_slice(&token[..len]);
-    arr
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1467,7 +1439,7 @@ mod tests {
                 tmp.path().join("persist"),
                 "coap://[::1]",
             )),
-            block_acks: crate::lwm2m::new_block_ack_map(),
+            client_acks: crate::lwm2m::new_ack_map(),
         };
         (ctx, tmp, dispatch_rx)
     }
