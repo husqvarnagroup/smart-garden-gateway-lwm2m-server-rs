@@ -9,6 +9,7 @@ name = "lwm2mserver_rs"
 path = "src/lib.rs"
 
 [dev-dependencies]
+proptest = "=1.8.0" # held back for Rust 1.75.0 (1.9 needs 1.82)
 tempfile = "=3.24.0" # held back for Rust 1.75.0
 # test-util enables tokio::time::pause() / start_paused for fast retry tests
 tokio = { version = "1", features = ["test-util"] }

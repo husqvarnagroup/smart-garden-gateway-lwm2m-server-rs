@@ -186,3 +186,118 @@ async fn coap_deregister_included_device_preserves_inclusion() {
 
     gw.stop().await;
 }
+
+// ── Property-based registration test ─────────────────────────────────────────
+
+use coap_lite::link_format::LinkFormatParser;
+use proptest::prelude::{ProptestConfig, Strategy};
+use proptest::{prop_assert, prop_assert_eq};
+
+/// Generates a valid LwM2M link-format payload such as
+/// `</>;rt="oma.lwm2m";ct=112,</3>;ver=1.0,</3/0>`.
+fn link_format_payload_strategy() -> impl Strategy<Value = Vec<u8>> {
+    use proptest::collection::vec as pvec;
+    use proptest::prelude::any;
+
+    // (object_id, has_version, version_major, version_minor, instance_ids)
+    let object = (
+        1u16..=3999u16,
+        any::<bool>(),
+        0u8..=9u8,
+        0u8..=9u8,
+        pvec(0u16..=0xfffeu16, 1..=5usize),
+    );
+
+    pvec(object, 1..=5usize).prop_map(|objects| {
+        let mut parts: Vec<String> = vec![r#"</>;rt="oma.lwm2m";ct=112"#.to_string()];
+        for (obj_id, has_version, major, minor, instances) in objects {
+            let version = if has_version {
+                format!(";ver={major}.{minor}")
+            } else {
+                String::new()
+            };
+            parts.push(format!("</{obj_id}>{version}"));
+            for inst in instances {
+                parts.push(format!("</{obj_id}/{inst}>"));
+            }
+        }
+        parts.join(",").into_bytes()
+    })
+}
+
+fn is_valid_link_format(payload: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(payload);
+    LinkFormatParser::new(&s).all(|r| r.is_ok())
+}
+
+proptest::proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
+    #[test]
+    fn coap_registration_accepts_arbitrary_valid_params(
+        endpoint in "[a-zA-Z0-9_-]{3,20}",
+        lifetime in 60u32..172800u32,
+        payload in link_format_payload_strategy(),
+    ) {
+        prop_assert!(
+            is_valid_link_format(&payload),
+            "generated payload is not valid link-format: {:?}",
+            String::from_utf8_lossy(&payload)
+        );
+
+        // proptest is sync; drive tokio manually per case.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let gw = common::TestGateway::start().await;
+            // Included device (normal post-bootstrap state): keeps the server
+            // from interleaving a factory-reset request with the response.
+            gw.bootstrap_registry.mark_included(&endpoint).await;
+
+            let mut pkt = Packet::new();
+            pkt.header.set_type(MessageType::Confirmable);
+            pkt.header.code = MessageClass::Request(Method::Post);
+            pkt.header.message_id = 0x0001;
+            pkt.set_token(vec![0x01]);
+            pkt.add_option(CoapOption::UriPath, b"rd".to_vec());
+            pkt.set_content_format(coap_lite::ContentFormat::ApplicationLinkFormat);
+            pkt.add_option(CoapOption::UriQuery, b"lwm2m=1.1".to_vec());
+            pkt.add_option(CoapOption::UriQuery, format!("ep={endpoint}").into_bytes());
+            pkt.add_option(CoapOption::UriQuery, format!("lt={lifetime}").into_bytes());
+            pkt.payload = payload.clone();
+
+            let sock = UdpSocket::bind("[::1]:0").await.unwrap();
+            sock.send_to(&pkt.to_bytes().unwrap(), gw.coap_addr)
+                .await
+                .unwrap();
+
+            let mut buf = vec![0u8; 256];
+            let (len, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
+                .await
+                .expect("registration timeout")
+                .unwrap();
+
+            let resp = Packet::from_bytes(&buf[..len]).unwrap();
+            prop_assert_eq!(resp.header.get_type(), MessageType::Acknowledgement);
+            prop_assert_eq!(resp.header.code, MessageClass::Response(Status::Created));
+            prop_assert!(resp.payload.is_empty());
+
+            let location: Vec<String> = resp
+                .get_option(CoapOption::LocationPath)
+                .map(|list| {
+                    list.iter()
+                        .map(|v| String::from_utf8_lossy(v).into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            prop_assert_eq!(location.len(), 2);
+            prop_assert_eq!(location[0].as_str(), "rd");
+            prop_assert!(
+                location[1].parse::<u64>().is_ok(),
+                "registration id must be numeric, got {:?}",
+                location[1]
+            );
+
+            gw.stop().await;
+            Ok(())
+        })?;
+    }
+}
