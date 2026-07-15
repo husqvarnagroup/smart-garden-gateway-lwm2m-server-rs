@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Config::from_args().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let ipso = load_shared(&cfg.ipso_directories).await;
+    let ipso = load_shared(&cfg.ipso_directories);
     let registry = DeviceRegistry::new();
     let bootstrap_registry =
         BootstrapRegistry::new(cfg.network_key.clone(), Some(cfg.server_uri.clone()));
@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
             let mut sighup = signal(SignalKind::hangup()).expect("SIGHUP handler");
             while sighup.recv().await.is_some() {
                 info!("SIGHUP received, reloading IPSO definitions");
-                let new_model = std::sync::Arc::new(IpsoModel::load_dirs(&dirs).await);
+                let new_model = std::sync::Arc::new(IpsoModel::load_dirs(&dirs));
                 *ipso.write().unwrap() = new_model;
             }
         });
