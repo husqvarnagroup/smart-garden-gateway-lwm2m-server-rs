@@ -1,5 +1,27 @@
 # AGENTS.md
 
+## Project origin
+
+This project is a rewrite of the code in `../sg-bnw-lwm2m-server`, which is
+written in Python, C and Cython. That code might not be available on every
+dev machine — do not assume it can be read or referenced locally.
+
+The implementation details of `../sg-bnw-lwm2m-server` are generally valued
+higher than strictly following specs like CoAP and LwM2M. When the original
+implementation deviates from a spec, match its behaviour rather than the spec.
+
+Match the original project's behaviour, not its code: do not do a
+source-to-source translation of the Python/C/Cython code — implement the
+same behaviour in idiomatic Rust.
+
+Structure of the original project:
+
+| Path | Purpose |
+|---|---|
+| `../sg-bnw-lwm2m-server/lwm2mserver/` | Main application code (Python) |
+| `../sg-bnw-lwm2m-server/lwm2mserver/wakaama/src/wakaama-c/` | Wakaama LwM2M library (C) |
+| `../sg-bnw-lwm2m-server/lwm2mserver/wakaama/src/` (excluding `wakaama-c/`) | Cython wrapper code (`.pyx` and `.pxd` files) |
+
 ## General
 
 ### Code
@@ -89,7 +111,9 @@ Largely implemented — `SPECIFICATION.md` is authoritative for current behaviou
 
 ## Specs
 
-Follow these specs:
+Follow these specs (but see [Project origin](#project-origin): the behaviour
+of the original `../sg-bnw-lwm2m-server` implementation takes precedence
+where it deviates):
 
 * Terminology for Constrained-Node Networks: RFC 7228
 * LwM2M 1.1
