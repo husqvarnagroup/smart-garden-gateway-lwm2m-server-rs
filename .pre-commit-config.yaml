@@ -15,3 +15,17 @@ repos:
       pass_filenames: false
       types: [file, rust]
       language: system
+    - id: python-format
+      name: Python format
+      description: Run ruff format on the component tests
+      entry: uv run --project component-tests ruff format component-tests
+      pass_filenames: false
+      types: [file, python]
+      language: system
+    - id: python-lint
+      name: Python lint
+      description: Run ruff check on the component tests
+      entry: uv run --project component-tests ruff check component-tests
+      pass_filenames: false
+      types: [file, python]
+      language: system

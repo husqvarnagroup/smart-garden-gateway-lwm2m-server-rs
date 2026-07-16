@@ -76,11 +76,22 @@ pub const TC_PLAIN: u32 = 0x0c;
 /// IPv6 Traffic Class: MAC-layer encryption active (post-bootstrap).
 pub const TC_ENCRYPTED: u32 = 0x1c;
 
+/// When set (--no-encryption), `set_tclass` is a no-op: packets keep the OS
+/// default traffic class and MAC-layer encryption is never requested.
+static TCLASS_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn disable_tclass() {
+    TCLASS_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Set the IPv6 Traffic Class on the socket before a send.
 ///
 /// On Linux this controls MAC-layer encryption in the radio module.
 /// On other platforms (macOS dev builds) the call is a no-op.
 pub fn set_tclass(socket: &UdpSocket, tc: u32) {
+    if TCLASS_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     #[cfg(target_os = "linux")]
     {
         use socket2::SockRef;
@@ -151,7 +162,11 @@ pub(super) fn coap_summary(pkt: &Packet) -> String {
     };
 
     let mid = pkt.header.message_id;
-    let token: String = pkt.get_token().iter().map(|b| format!("{b:02x}")).collect();
+    let token: String = pkt.get_token().iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
 
     let path = pkt
         .get_option(CoapOption::UriPath)
