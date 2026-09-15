@@ -451,7 +451,7 @@ async fn handle_registration(
     info!(device = %endpoint, id, %addr, activity = "registration", "Device registered");
 
     if !bootstrap_registry.is_included(&endpoint).await {
-        warn!(device = %endpoint, activity = "registration", "Device not included — triggering factory reset");
+        warn!(device = %endpoint, activity = "registration", "Device registered but is not included. Sending factory reset");
 
         let (response_tx, _) = oneshot::channel();
         let op = PendingOperation::new(
