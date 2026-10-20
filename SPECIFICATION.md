@@ -96,6 +96,7 @@ Bootstrap sessions expire after 30 seconds if the device never responds to `GET 
 #### Bootstrap Cryptography
 
 During step 5 above, the Security Object instance `/0/1` is written with:
+
 - `/0/1/0` — server CoAP URI
 - `/0/1/1` — `false` (not a bootstrap server)
 - `/0/1/2` — security mode `3` (NoSec; radio module provides encryption)
@@ -103,6 +104,7 @@ During step 5 above, the Security Object instance `/0/1` is written with:
 - `/0/1/5` — network key encrypted for the device
 
 Key encryption procedure:
+
 ```
 shared_x        = ECDH(server_ephemeral_private, device_P256_public).x_coordinate
 aes_key         = shared_x[:16]                       # first 16 bytes of X coord

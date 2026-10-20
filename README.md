@@ -163,6 +163,7 @@ Returns accumulated IPSO state for each included device.
 ```
 
 Response:
+
 ```json
 [{"payload":{"<sgtin>":{"device":{"_urn":"…","0":{…}}}},"success":true}]
 ```
@@ -178,6 +179,7 @@ After a device sends its first `/bs` request its certificate is read and an `inc
 where `<id>` is the numeric identifier from the event. The approval is stored; the write phase starts automatically on the device's next `/bs` request.
 
 Response:
+
 ```json
 [{"success":true}]
 ```
@@ -199,6 +201,7 @@ Example — trigger an RF link measurement:
 ```
 
 Response on success:
+
 ```json
 [{"metadata":{"lwm2m_client_id":1,"lwm2m_uri":[12345,0,1],"lwm2m_response":"CHANGED","lwm2m_response_code":68},"success":true}]
 ```
@@ -416,6 +419,7 @@ Both are changed from `5` (FPXX / `Val_GNU_MIPS_ABI_FP_XX`) to `3` (soft-float /
 Rust's `unwind` crate always emits `cargo:rustc-link-lib=gcc_s` (dynamic link), pulling in `libgcc_s.so.1` regardless of `panic = "abort"`. The MT7688 has only a hard-float `libgcc_s.so.1` — the only file on the system with a mismatched float ABI — so the dynamic linker rejects it.
 
 **Workaround**: Two parts:
+
 1. `src/unwind_stubs.rs` provides no-op `#[no_mangle]` implementations of every `_Unwind_*` symbol that would otherwise come from `libgcc_s.so.1`. These are compiled by rustc for the correct soft-float ABI.
 2. `build.rs` writes a fake `libgcc_s.so` linker script to `$OUT_DIR` (which takes precedence in the link search path). When the linker resolves `-lgcc_s` it finds this empty script first, so `libgcc_s.so.1` is never added to `DT_NEEDED`.
 3. `--as-needed` in `rustflags` provides a belt-and-suspenders: shared libraries with no unresolved symbol references (which is the case after our stubs satisfy all `_Unwind_*`) are excluded from `DT_NEEDED`.
