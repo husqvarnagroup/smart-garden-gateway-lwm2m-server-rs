@@ -54,13 +54,14 @@ in `SPECIFICATION.md` for a full list of intentional or known differences.
 OS, BusyBox, and radio interface (`ppp0` — IPv6-only PPP over `/dev/ttyS1` at
 500 000 baud) are identical on both gateways.
 
+<!-- markdownlint-disable line-length -->
 | Property | smart Gateway 19000 | smart Gateway 19005 |
 | --- | --- | --- |
 | CPU | ARMv5TE (`armv5tejl`) | MediaTek MT7688 — MIPS 24KEc V5.5, MIPS32r2 |
 | C library ABI | hard-float | soft-float — glibc, libpthread, libm, libdl all compiled `-msoft-float` |
 | Rust target | `armv5te-unknown-linux-gnueabi` | `mipsel-unknown-linux-gnu` |
 | Build script | `./build-arm.sh` | `./build-mips.sh` |
-
+<!-- markdownlint-enable line-length -->
 ---
 
 ## Development setup (one-time)
@@ -158,7 +159,7 @@ lwm2mserver-rs ppp0 --bind-to-device \
 Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2mserver_rs=debug`.
 
 ### Arguments
-
+<!-- markdownlint-disable line-length -->
 | Argument | Required | Default | Description |
 | --- | --- | --- | --- |
 | `<interface>` | yes | — | Network interface for CoAP traffic (e.g. `ppp0`) |
@@ -168,7 +169,7 @@ Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2mserver_rs=debug`.
 | `--lb-key-file` | no | `/var/lib/lemonbeatd/…/Network_key.json` | JSON file containing `"network_key"` as a hex string |
 | `--ipso-directories` | no | _(none)_ | One or more directories containing IPSO object definition XML files (space-separated). All `*.xml` files in each directory are loaded at startup and used to translate `/dp` payloads into named, typed events. |
 | `RUST_LOG` | no | `lwm2mserver_rs=info` | Log filter (env var) |
-
+<!-- markdownlint-enable line-length -->
 ---
 
 ## IPC sockets
@@ -392,6 +393,7 @@ On the next `/bs` received after approval has been stored:
    waits for device ACK before proceeding (RFC 7252: 2 s initial timeout, up to
    4 retries, exponential backoff):
 
+<!-- markdownlint-disable line-length -->
 | Step | Operation | Path | Content |
 | --- | --- | --- | --- |
 | 1 | `DELETE` | `/1` | Clear existing Server Object instances |
@@ -399,6 +401,7 @@ On the next `/bs` received after approval has been stored:
 | 3 | `DELETE` | `/0` | Clear existing Security Object instances |
 | 4 | `PUT` | `/0/1` | Server URI, server public key, encrypted network key (SenML+CBOR) |
 | 5 | `POST` | `/bs` | Bootstrap finish signal |
+<!-- markdownlint-enable line-length -->
 
 After the device ACKs `POST /bs` it switches to encrypted traffic (TC=0x1c).
 
@@ -473,11 +476,13 @@ containing `<ObjectVersion>1.1</ObjectVersion>` is used. Files without an
 
 The server persists state to `/var/lib/lwm2mserver/` across restarts:
 
+<!-- markdownlint-disable line-length -->
 | File | Contents |
 | --- | --- |
 | `wakaama.json` | Registered device snapshots (endpoint, address, lifetime, object versions). Written atomically on every registration and heartbeat. Expired entries are skipped on load. |
 | `included_devices.json` | List of included device endpoints. Written on inclusion and exclusion. |
 | `devices/<sgtin>.json` | Accumulated IPSO state per device from `/dp` payloads. Written on every data push. Deleted on device factory reset. |
+<!-- markdownlint-enable line-length -->
 
 All writes are atomic (write to `.tmp`, then `rename`). On startup, restored
 devices are placed in the offline state regardless of their persisted status;
@@ -551,7 +556,7 @@ build-std = ["std", "panic_abort"]
 ---
 
 ## Project layout
-
+<!-- markdownlint-disable line-length -->
 ```text
 src/
 ├── main.rs           Entry point. Spawns long-running tasks under a shared
@@ -650,9 +655,10 @@ src/
                         (systemd). Emits structured data in the bnw@55029 SD-ID;
                         suppresses the plain fmt layer to avoid duplicate output.
 ```
-
+<!-- markdownlint-enable line-length -->
 ### Task topology
 
+<!-- markdownlint-disable line-length -->
 ```text
                       ┌──────────────────────────────────────┐
 UDP :20017 ──────────►│ lwm2m::server (inbound CoAP)         │
@@ -681,3 +687,4 @@ UDP :20017 ──────────►│ lwm2m::server (inbound CoAP)    
                       │   connectivity pings                 │
                       └──────────────────────────────────────┘
 ```
+<!-- markdownlint-enable line-length -->

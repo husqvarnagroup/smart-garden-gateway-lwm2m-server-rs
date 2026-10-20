@@ -27,6 +27,7 @@ library.
 
 The server runs five concurrent tasks orchestrated with a `CancellationToken`:
 
+<!-- markdownlint-disable line-length -->
 | Task | Module | Role |
 | --- | --- | --- |
 | **CoAP server** | `lwm2m::server` | Receives all inbound UDP packets; handles `/bs`, `/rd`, `/dp`, DELETE, and ACK/RST routing |
@@ -34,6 +35,7 @@ The server runs five concurrent tasks orchestrated with a `CancellationToken`:
 | **Housekeeping** | `housekeeping` | Runs every 60 s: expires stale registrations, times out in-flight operations, expires stale bootstrap sessions, sends connectivity pings |
 | **IPC command** | `ipc::command` | Listens on `lwm2mserver-command.ipc`; handles JSON command requests from other services |
 | **IPC event** | `ipc::event` | Listens on `lwm2mserver-event.ipc`; relays events to all connected subscribers |
+<!-- markdownlint-enable line-length -->
 
 All state is protected by `tokio::sync::RwLock` or `tokio::sync::Mutex`.
 Operations from the IPC command task are injected into the CoAP dispatch task
@@ -84,12 +86,14 @@ handled by `sgtin_from_ep()`.
 
 IPC messages use a JSON array envelope. Each element has four fields:
 
+<!-- markdownlint-disable line-length -->
 | Field | Type | Description |
 | --- | --- | --- |
 | `op` | string | `"update"`, `"delete"` (events); `"read"`, `"write"`, `"execute"` (commands) |
 | `entity` | object | `{"device": "<sgtin>", "path": "..."}` or `{"service": "lwm2mserver", "path": "..."}` |
 | `payload` | object | Dict of typed values (`vs`, `vi`, `vf`, `vb`, `vo`, `vt` keys for string/int/float/bool/opaque/time) |
 | `metadata` | object | Source service name, monotone sequence number, LWM2M response codes |
+<!-- markdownlint-enable line-length -->
 
 Messages are serialised as JSON lines (newline-delimited) on the sockets.
 
@@ -204,6 +208,7 @@ The server:
 
 Commands arrive on the command socket as JSON arrays. Supported operations:
 
+<!-- markdownlint-disable line-length -->
 | `op` | `entity.path` | Action |
 | --- | --- | --- |
 | `read` | `devices` | Returns the in-memory state + online status for all included devices |
@@ -212,6 +217,7 @@ Commands arrive on the command socket as JSON arrays. Supported operations:
 | `execute` | any other `obj/inst/res` path | Looks up numeric IDs via IpsoModel, dispatches `Execute` to device |
 | `write` | `firmware_update/0/package` | FOTA upload (see below) |
 | `write` | any other `obj/inst/res` path | Looks up numeric IDs via IpsoModel, dispatches `Write` to device |
+<!-- markdownlint-enable line-length -->
 
 Path resolution: the IPC path uses snake_case names
 (`object_name/instance_id/resource_name`). These are translated to numeric IDs
@@ -285,6 +291,7 @@ The server uses `sd_notify` to signal systemd:
 
 ## Module Inventory
 
+<!-- markdownlint-disable line-length -->
 | File | Responsibility |
 | --- | --- |
 | `main.rs` | Startup: logging, config, state restore, task spawning, signal handling |
@@ -302,11 +309,13 @@ The server uses `sd_notify` to signal systemd:
 | `lwm2m/ipso.rs` | `IpsoModel` — loads and queries IPSO object definitions from XML; snake_case name conversion |
 | `logging/` | Structured logging with `tracing`: journal/syslog layer + console formatter |
 | `error.rs` | `Error` enum and `Result` type alias |
+<!-- markdownlint-enable line-length -->
 
 ---
 
 ## Key CLI Arguments
 
+<!-- markdownlint-disable line-length -->
 | Argument | Default | Description |
 | --- | --- | --- |
 | `<interface>` | (required) | Network interface name for CoAP traffic (e.g. `ppp0`) |
@@ -315,6 +324,7 @@ The server uses `sd_notify` to signal systemd:
 | `--port` | `20017` | UDP port to listen on |
 | `--lb-key-file` | `/var/lib/lemonbeatd/Network_management/Network_key.json` | JSON file containing the network key (`hex` field `"network_key"`) |
 | `--ipso-directories` | (none) | Directories containing IPSO object definition XML files |
+<!-- markdownlint-enable line-length -->
 
 Log verbosity is controlled by the `RUST_LOG` environment variable (default:
 `lwm2mserver_rs=info`). When running under systemd with `JOURNAL_STREAM` set,
@@ -324,6 +334,7 @@ logs are written to the journal in structured format; otherwise to stderr.
 
 ## Connectivity Ping Timing Constants
 
+<!-- markdownlint-disable line-length -->
 | Constant | Value | Description |
 | --- | --- | --- |
 | `ONLINE_PING_INTERVAL` | 9000 s (2.5 h) | How long without contact before pinging an online device |
@@ -333,6 +344,7 @@ logs are written to the journal in structured format; otherwise to stderr.
 | `IN_FLIGHT_TIMEOUT_SECS` | 60 s | Maximum time an in-flight operation may wait for a response |
 | `BOOTSTRAP_TIMEOUT_SECS` | 30 s | Maximum time to wait for a device to respond to `GET /0/0` |
 | `BLOCK_THRESHOLD` | 512 B | Minimum payload length that triggers block-wise transfer |
+<!-- markdownlint-enable line-length -->
 
 ---
 
@@ -393,11 +405,13 @@ bootstrap requests from any address without restriction.
 
 ### Different Connectivity Timeouts
 
+<!-- markdownlint-disable line-length -->
 | Parameter | Python | Rust |
 | --- | --- | --- |
 | Online → offline threshold | 9000 s (2.5 h) | 9000 s (2.5 h) (`ONLINE_PING_INTERVAL`) |
 | Offline ping period | 900 s (15 min) | 900 s (15 min) (`OFFLINE_PING_INTERVAL`) |
 | Offline ping window | unlimited | 6 h (`OFFLINE_PING_MAX_DURATION`) |
+<!-- markdownlint-enable line-length -->
 
 ### No READ Operation Forwarded to Device
 
