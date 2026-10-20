@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: GARDENA GmbH
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 [default]
 # Ignore long base64 strings, e.g. embedded PEM certificates
 extend-ignore-re = ["[0-9A-Za-z+/=]{40,}"]

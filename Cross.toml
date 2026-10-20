@@ -1,2 +1,6 @@
+# SPDX-FileCopyrightText: GARDENA GmbH
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 [target.mipsel-unknown-linux-gnu]
 build-std = ["std", "panic_abort"]
