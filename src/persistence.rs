@@ -85,7 +85,7 @@ impl PersistenceStore {
 
     pub fn load_registry(&self) -> Vec<DeviceSnapshot> {
         let path = self.dir.join("wakaama.json");
-        let content = match std::fs::read_to_string(&path) {
+        let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
@@ -186,7 +186,7 @@ impl PersistenceStore {
 
     pub fn load_included(&self) -> Vec<String> {
         let path = self.dir.join("included_devices.json");
-        let content = match std::fs::read_to_string(&path) {
+        let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
@@ -212,7 +212,7 @@ impl PersistenceStore {
 
     pub fn delete_device_state(&self, endpoint: &str) {
         let path = self.dir.join("devices").join(format!("{endpoint}.json"));
-        if let Err(e) = std::fs::remove_file(&path) {
+        if let Err(e) = std::fs::remove_file(path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 warn!(endpoint, "Persistence: delete device state failed: {e}");
             }
@@ -222,7 +222,7 @@ impl PersistenceStore {
     pub fn load_all_device_states(&self) -> HashMap<String, serde_json::Value> {
         let devices_dir = self.dir.join("devices");
         let mut states = HashMap::new();
-        let entries = match std::fs::read_dir(&devices_dir) {
+        let entries = match std::fs::read_dir(devices_dir) {
             Ok(e) => e,
             Err(_) => return states,
         };
