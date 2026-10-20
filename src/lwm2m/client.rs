@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: GARDENA GmbH
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use coap_lite::{

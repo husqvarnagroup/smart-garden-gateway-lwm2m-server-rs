@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: GARDENA GmbH
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // No-op stubs for _Unwind_* symbols required by std's backtrace code on MIPS.
 // With panic=abort these are never called. Defining them here (compiled by
 // rustc as soft-float per the mipsel-unknown-linux-gnu target spec) lets the
