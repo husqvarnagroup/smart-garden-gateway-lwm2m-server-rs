@@ -5,11 +5,13 @@
 These repositories are not always in the checkout. Do not assume that you can
 read them locally.
 
+<!-- markdownlint-disable line-length -->
 | Path | Purpose |
 | --- | --- |
 | `../sg-bnw-lwm2m-server` | Original project (Python, C, Cython). This project rewrites it. |
 | `../wakaama-pyx-analysis-workspace` | Spec of Wakaama, made from an analysis of `sg-bnw-lwm2m-server`. Wakaama is part of the rewrite. |
 | `../sg-bnw-lwm2m-component-tests` | Black-box tests. They run against the original and this project. The results must match. |
+<!-- markdownlint-enable line-length -->
 
 ### Original project
 
@@ -34,7 +36,7 @@ cargo test --doc              # doc tests only
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo machete                 # unused dependencies
-cargo llvm-cov --all-features --workspace --codecov --output-path codecov.json  # coverage
+cargo llvm-cov --all-features --workspace --codecov --output-path codecov.json
 ```
 
 Before each commit, run `fmt`, then `clippy`, then `test`. All must pass.
