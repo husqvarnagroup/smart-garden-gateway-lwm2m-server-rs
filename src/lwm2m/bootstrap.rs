@@ -486,7 +486,7 @@ fn pem_to_der(pem: &str) -> crate::error::Result<Vec<u8>> {
         .collect::<Vec<_>>()
         .join("");
     STANDARD
-        .decode(&body)
+        .decode(body)
         .map_err(|e| crate::error::Error::Bootstrap(format!("PEM base64: {e}")))
 }
 
