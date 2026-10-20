@@ -4,7 +4,7 @@ Rust service running on an embedded Linux gateway. It acts as an LWM2M server
 for IoT devices communicating over a proprietary radio (PPP/IPv6) and exposes
 Unix domain sockets for local command/event integration.
 
-```
+```text
 local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/IPv6──►  IoT devices
                ◄──event (Unix socket)─  (on gateway)         (ppp0)
 ```
@@ -20,12 +20,12 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 - [MIPS cross-compilation notes](#mips-cross-compilation-notes)
 - [Usage](#usage)
 - [IPC sockets](#ipc-sockets)
-  - [Command socket](#command-socket----tmplwm2mserver-commandipc)
+  - [Command socket](#command-socket--tmplwm2mserver-commandipc)
     - [List registered devices](#list-registered-devices)
     - [Approve device inclusion](#approve-device-inclusion)
     - [Execute a device resource](#execute-a-device-resource)
     - [Write a device resource](#write-a-device-resource)
-  - [Event socket](#event-socket----tmplwm2mserver-eventipc)
+  - [Event socket](#event-socket--tmplwm2mserver-eventipc)
     - [Includable device event](#includable-device-event)
     - [Device data event](#device-data-event)
     - [Connection status event](#connection-status-event)
@@ -55,7 +55,7 @@ OS, BusyBox, and radio interface (`ppp0` — IPv6-only PPP over `/dev/ttyS1` at
 500 000 baud) are identical on both gateways.
 
 | Property | smart Gateway 19000 | smart Gateway 19005 |
-|---|---|---|
+| --- | --- | --- |
 | CPU | ARMv5TE (`armv5tejl`) | MediaTek MT7688 — MIPS 24KEc V5.5, MIPS32r2 |
 | C library ABI | hard-float | soft-float — glibc, libpthread, libm, libdl all compiled `-msoft-float` |
 | Rust target | `armv5te-unknown-linux-gnueabi` | `mipsel-unknown-linux-gnu` |
@@ -160,7 +160,7 @@ Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2mserver_rs=debug`.
 ### Arguments
 
 | Argument | Required | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `<interface>` | yes | — | Network interface for CoAP traffic (e.g. `ppp0`) |
 | `--bind-to-device` | no | off | Bind CoAP socket to the interface via `SO_BINDTODEVICE` |
 | `--server-uri` | no | `coap://[fc00::6:100:0:0]` | This server's CoAP URI written to devices during bootstrap |
@@ -354,7 +354,7 @@ The radio module uses the IPv6 Traffic Class byte to control MAC-layer
 encryption:
 
 | TC | Meaning |
-|---|---|
+| --- | --- |
 | `0x0c` | No MAC encryption — used before the network key is exchanged |
 | `0x1c` | MAC encryption active — used after bootstrap completes |
 
@@ -393,7 +393,7 @@ On the next `/bs` received after approval has been stored:
    4 retries, exponential backoff):
 
 | Step | Operation | Path | Content |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | `DELETE` | `/1` | Clear existing Server Object instances |
 | 2 | `PUT` | `/1/1` | Short Server ID=1, Lifetime=86400, Binding="U" (SenML+CBOR) |
 | 3 | `DELETE` | `/0` | Clear existing Security Object instances |
@@ -474,7 +474,7 @@ containing `<ObjectVersion>1.1</ObjectVersion>` is used. Files without an
 The server persists state to `/var/lib/lwm2mserver/` across restarts:
 
 | File | Contents |
-|---|---|
+| --- | --- |
 | `wakaama.json` | Registered device snapshots (endpoint, address, lifetime, object versions). Written atomically on every registration and heartbeat. Expired entries are skipped on load. |
 | `included_devices.json` | List of included device endpoints. Written on inclusion and exclusion. |
 | `devices/<sgtin>.json` | Accumulated IPSO state per device from `/dp` payloads. Written on every data push. Deleted on device factory reset. |
@@ -552,7 +552,7 @@ build-std = ["std", "panic_abort"]
 
 ## Project layout
 
-```
+```text
 src/
 ├── main.rs           Entry point. Spawns long-running tasks under a shared
 │                     CancellationToken; any task failure brings down the process
@@ -653,7 +653,7 @@ src/
 
 ### Task topology
 
-```
+```text
                       ┌──────────────────────────────────────┐
 UDP :20017 ───────────►│ lwm2m::server (inbound CoAP)         │
                       │   recv_from loop                     │──► coap_dispatch_tx

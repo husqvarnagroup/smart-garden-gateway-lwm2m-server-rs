@@ -13,7 +13,7 @@ devices over IPv6/UDP, handles their full lifecycle (inclusion, registration,
 operations), and exposes a Unix-socket-based event bus so that other local
 services can subscribe to device events and send commands.
 
-```
+```text
   [RF Devices]  --UDP/CoAP-->  [lwm2mserver-rs]  --Unix socket--> [Event Bus]
 ```
 
@@ -28,7 +28,7 @@ library.
 The server runs five concurrent tasks orchestrated with a `CancellationToken`:
 
 | Task | Module | Role |
-|---|---|---|
+| --- | --- | --- |
 | **CoAP server** | `lwm2m::server` | Receives all inbound UDP packets; handles `/bs`, `/rd`, `/dp`, DELETE, and ACK/RST routing |
 | **CoAP dispatch** | `lwm2m::client` | Sends outbound operations (Read/Write/Execute) to devices; manages retransmission and block-wise transfer |
 | **Housekeeping** | `housekeeping` | Runs every 60 s: expires stale registrations, times out in-flight operations, expires stale bootstrap sessions, sends connectivity pings |
@@ -85,7 +85,7 @@ handled by `sgtin_from_ep()`.
 IPC messages use a JSON array envelope. Each element has four fields:
 
 | Field | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `op` | string | `"update"`, `"delete"` (events); `"read"`, `"write"`, `"execute"` (commands) |
 | `entity` | object | `{"device": "<sgtin>", "path": "..."}` or `{"service": "lwm2mserver", "path": "..."}` |
 | `payload` | object | Dict of typed values (`vs`, `vi`, `vf`, `vb`, `vo`, `vt` keys for string/int/float/bool/opaque/time) |
@@ -151,7 +151,7 @@ During step 5 above, the Security Object instance `/0/1` is written with:
 
 Key encryption procedure:
 
-```
+```text
 shared_x        = ECDH(server_ephemeral_private, device_P256_public).x_coordinate
 aes_key         = shared_x[:16]                       # first 16 bytes of X coord
 random_prefix   = urandom(14)
@@ -205,7 +205,7 @@ The server:
 Commands arrive on the command socket as JSON arrays. Supported operations:
 
 | `op` | `entity.path` | Action |
-|---|---|---|
+| --- | --- | --- |
 | `read` | `devices` | Returns the in-memory state + online status for all included devices |
 | `execute` | `includable_device/<id>/include` | Approves inclusion for device with given id |
 | `execute` | `device/0/factory_reset` | Triggers exclusion: sends factory reset to device, removes from registry and included list |
@@ -286,7 +286,7 @@ The server uses `sd_notify` to signal systemd:
 ## Module Inventory
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `main.rs` | Startup: logging, config, state restore, task spawning, signal handling |
 | `config.rs` | CLI argument parsing (`clap`), `Config` struct, network key loading |
 | `model.rs` | Core data types: `Device`, `ResourcePath`, `LwM2mCommand`, `LwM2mError`, `PendingOperation`, well-known path constants |
@@ -308,7 +308,7 @@ The server uses `sd_notify` to signal systemd:
 ## Key CLI Arguments
 
 | Argument | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `<interface>` | (required) | Network interface name for CoAP traffic (e.g. `ppp0`) |
 | `--bind-to-device` | false | Bind CoAP socket to the interface via `SO_BINDTODEVICE` |
 | `--server-uri` | `coap://[fc00::6:100:0:0]` | CoAP URI of this server, written to devices during bootstrap |
@@ -325,7 +325,7 @@ logs are written to the journal in structured format; otherwise to stderr.
 ## Connectivity Ping Timing Constants
 
 | Constant | Value | Description |
-|---|---|---|
+| --- | --- | --- |
 | `ONLINE_PING_INTERVAL` | 9000 s (2.5 h) | How long without contact before pinging an online device |
 | `OFFLINE_PING_INTERVAL` | 15 min | How often to ping an offline device |
 | `OFFLINE_PING_MAX_DURATION` | 6 h | Stop pinging after device has been offline this long |
@@ -394,7 +394,7 @@ bootstrap requests from any address without restriction.
 ### Different Connectivity Timeouts
 
 | Parameter | Python | Rust |
-|---|---|---|
+| --- | --- | --- |
 | Online → offline threshold | 9000 s (2.5 h) | 9000 s (2.5 h) (`ONLINE_PING_INTERVAL`) |
 | Offline ping period | 900 s (15 min) | 900 s (15 min) (`OFFLINE_PING_INTERVAL`) |
 | Offline ping window | unlimited | 6 h (`OFFLINE_PING_MAX_DURATION`) |
