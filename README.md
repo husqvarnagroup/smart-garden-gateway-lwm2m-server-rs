@@ -655,13 +655,13 @@ src/
 
 ```text
                       ┌──────────────────────────────────────┐
-UDP :20017 ───────────►│ lwm2m::server (inbound CoAP)         │
+UDP :20017 ──────────►│ lwm2m::server (inbound CoAP)         │
                       │   recv_from loop                     │──► coap_dispatch_tx
                       │   /bs / /rd / /dp / DELETE / ACK/RST │──► event_sender (broadcast)
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
-                      │ lwm2m::client (outbound CoAP)         │◄── coap_dispatch_tx
+                      │ lwm2m::client (outbound CoAP)        │◄── coap_dispatch_tx
                       │   send CON requests, retransmit loop │──► event_sender (connection_status)
                       └──────────────────────────────────────┘
 
@@ -676,8 +676,8 @@ UDP :20017 ───────────►│ lwm2m::server (inbound CoAP) 
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
-                      │ housekeeping (60 s interval)          │
+                      │ housekeeping (60 s interval)         │
                       │   expire registrations, timeout ops, │──► coap_dispatch_tx
-                      │   connectivity pings                  │
+                      │   connectivity pings                 │
                       └──────────────────────────────────────┘
 ```
