@@ -2,109 +2,105 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-name: Build and Test
+name: Build project
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
 
-permissions:
-  contents: read
+env:
+  CARGO_TERM_COLOR: always
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  actions: read
+
 jobs:
-  build_and_test:
-    runs-on: ubuntu-24.04
-
+  build:
+    name: Build and Test
+    runs-on: ubuntu-26.04
     strategy:
-      fail-fast: false
       matrix:
-        rust_version: ["1.75", "1.94", "stable", "nightly"]
-
+        rust: ["1.75", "1.94"]  # Rust versions for Yocto Scarthgap and Wrynose
     steps:
-    - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-    - name: Install Rust
-      run: |
-        rustup install ${{ matrix.rust_version }}
-        rustup default ${{ matrix.rust_version }}
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: ${{ matrix.rust }}
+          override: true
+          components: rustfmt, clippy
 
-    - name: Cache Rust build
-      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-    - name: Build
-      run: |
-        cargo --version
-        rustc --version
-        cargo build --verbose
+      - name: Check Rust version
+        run: rustc --version
 
-    - name: Test
-      run: |
-        cargo --version
-        cargo test --verbose
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Run unit tests
+        run: cargo test --verbose
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Check Rust format
+        run: cargo fmt --all -- --check
 
   lint:
-    runs-on: ubuntu-24.04
-
+    name: Lint
+    runs-on: ubuntu-26.04
     steps:
-    - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-    - name: Install Rust
-      run: |
-        rustup install stable
-        rustup default stable
+      - name: Instal cargo binstall
+        uses: cargo-bins/cargo-binstall@422f3094be6a0843857aa008b499caaf6bce0da8 # v1.24.0
+        with:
+          version: "1.24.0"
 
-    - name: Cache Rust build
-      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Check Cargo.toml format
+        run: |
+          cargo binstall cargo-sort@1.0.9 --no-confirm --disable-strategies compile
+          cargo sort --check --check-format --grouped
 
-    - name: Clippy
-      run: |
-        cargo clippy --version
-        cargo clippy --all-targets --all-features -- -D warnings
+      - name: Find typos
+        run: |
+          cargo binstall typos-cli@1.29.5 --no-confirm --disable-strategies compile
+          typos
 
-    - name: rustfmt
-      run: |
-        cargo fmt --version
-        cargo fmt --all -- --check
+      - name: Lint shell scripts
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          scandir: '.'
 
-    # The clippy hook reuses the build artifacts from the Clippy step above,
-    # so this only re-checks formatting on top of the steps above and ensures that
-    # pre-commit works as expected.
-    - name: pre-commit
-      run: |
-        pipx install pre-commit==4.2.0
-        pre-commit run --all-files
+      - name: Check REUSE compliance
+        uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
 
-  typos:
-    runs-on: ubuntu-24.04
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@f714bf454f350590f4a24c3ddb1aef02c35bf5b6 # v3.97.5
+        with:
+          extra_args: --results=verified,unknown
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
 
-    - name: Check for typos
-      uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.48.0
+      - name: Run pre-commit
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --all-files
 
-  gitlint:
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'pull_request'
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      with:
-        # Full history is needed to lint the whole commit range of the PR
-        fetch-depth: 0
-
-    - name: gitlint
-      run: |
-        # The gitlint package is a meta-package; the executable is in gitlint-core
-        pipx install gitlint-core==0.19.1
-        gitlint --version
-        gitlint --commits ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4

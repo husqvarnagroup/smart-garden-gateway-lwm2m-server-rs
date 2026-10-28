@@ -3,19 +3,46 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 repos:
-  - repo: local
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.3.0
     hooks:
-    - id: rust-fmt
-      name: Rust format
-      description: Run cargo fmt on files
-      entry: cargo fmt --all --
-      pass_filenames: false
-      types: [file, rust]
-      language: system
-    - id: rust-clippy
-      name: Rust clippy
-      description: Run cargo clippy on files
-      entry: cargo clippy --all-targets --all-features -- -D warnings
-      pass_filenames: false
-      types: [file, rust]
-      language: system
+      - id: check-byte-order-marker
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+      - id: clippy
+      - id: cargo-check
+
+  - repo: https://github.com/ambv/black
+    rev: 26.5.1
+    hooks:
+      - id: black
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.3.0
+    hooks:
+      - id: flake8
+        args: [--config, tests/.flake8]
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.31.1
+    hooks:
+      - id: markdownlint-fix
+
+  - repo: https://github.com/zricethezav/gitleaks
+    rev: v8.8.11
+    hooks:
+      - id: gitleaks-docker
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.50.2
+    hooks:
+      - id: typos
