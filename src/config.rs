@@ -33,6 +33,11 @@ struct Cli {
     /// Directories containing IPSO object definition XML files
     #[arg(long, num_args = 0.., value_name = "DIR")]
     ipso_directories: Vec<PathBuf>,
+
+    /// Never request MAC-layer encryption: leave the IPv6 traffic class
+    /// untouched on all sent packets
+    #[arg(long)]
+    no_encryption: bool,
 }
 
 pub struct Config {
@@ -50,6 +55,9 @@ pub struct Config {
 
     /// Directories to scan for IPSO object definition XML files (from --ipso-directories).
     pub ipso_directories: Vec<std::path::PathBuf>,
+
+    /// Never set the IPv6 traffic class on sent packets (from --no-encryption).
+    pub no_encryption: bool,
 }
 
 impl Config {
@@ -66,6 +74,7 @@ impl Config {
             server_uri: cli.server_uri,
             network_key,
             ipso_directories: cli.ipso_directories,
+            no_encryption: cli.no_encryption,
         })
     }
 }
