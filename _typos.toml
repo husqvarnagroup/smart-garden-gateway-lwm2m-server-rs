@@ -1,3 +1,7 @@
 [default]
 # Ignore long base64 strings, e.g. embedded PEM certificates
 extend-ignore-re = ["[0-9A-Za-z+/=]{40,}"]
+
+[default.extend-identifiers]
+# Misspelled constant from the original C code, referenced as-is in the porting notes
+WAKEUP_DESICION_TRESHOLD_S = "WAKEUP_DESICION_TRESHOLD_S"
