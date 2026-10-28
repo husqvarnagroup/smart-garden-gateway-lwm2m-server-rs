@@ -55,13 +55,27 @@ where
                 if i > 0 {
                     write!(writer, " ")?;
                 }
-                write!(writer, "{k}={v}")?;
+                write!(writer, "{k}=\"{}\"", escape_field(v))?;
             }
             write!(writer, "] ")?;
         }
 
         writeln!(writer, "{}", visitor.message)
     }
+}
+
+/// Escape a field value for `k="v"` display, matching the quoting the syslog layer uses.
+fn escape_field(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            ']' => out.push_str("\\]"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn level_color(level: Level) -> &'static str {
