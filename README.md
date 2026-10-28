@@ -1,8 +1,10 @@
 # lwm2mserver-rs
 
-Rust service running on an embedded Linux gateway. It acts as an LWM2M server for IoT devices communicating over a proprietary radio (PPP/IPv6) and exposes Unix domain sockets for local command/event integration.
+Rust service running on an embedded Linux gateway. It acts as an LWM2M server
+for IoT devices communicating over a proprietary radio (PPP/IPv6) and exposes
+Unix domain sockets for local command/event integration.
 
-```
+```text
 local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/IPv6──►  IoT devices
                ◄──event (Unix socket)─  (on gateway)         (ppp0)
 ```
@@ -18,12 +20,12 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 - [MIPS cross-compilation notes](#mips-cross-compilation-notes)
 - [Usage](#usage)
 - [IPC sockets](#ipc-sockets)
-  - [Command socket](#command-socket----tmplwm2mserver-commandipc)
+  - [Command socket](#command-socket--tmplwm2mserver-commandipc)
     - [List registered devices](#list-registered-devices)
     - [Approve device inclusion](#approve-device-inclusion)
     - [Execute a device resource](#execute-a-device-resource)
     - [Write a device resource](#write-a-device-resource)
-  - [Event socket](#event-socket----tmplwm2mserver-eventipc)
+  - [Event socket](#event-socket--tmplwm2mserver-eventipc)
     - [Includable device event](#includable-device-event)
     - [Device data event](#device-data-event)
     - [Connection status event](#connection-status-event)
@@ -38,33 +40,39 @@ local process  ──IPC (Unix socket)──►  lwm2mserver-rs  ──CoAP/UDP/
 
 ## Open issues
 
-- **Mower compatibility** — protocol or object-model differences for mower devices have not been validated.
+- **Mower compatibility** — protocol or object-model differences for mower
+  devices have not been validated.
 - **Water Control compatibility** — wake-up not implemented
 
-See [Deviations from Python Code](SPECIFICATION.md#deviations-from-python-code) in `SPECIFICATION.md` for a full list of intentional or known differences.
+See [Deviations from Python Code](SPECIFICATION.md#deviations-from-python-code)
+in `SPECIFICATION.md` for a full list of intentional or known differences.
 
 ---
 
 ## Target hardware
 
-OS, BusyBox, and radio interface (`ppp0` — IPv6-only PPP over `/dev/ttyS1` at 500 000 baud) are identical on both gateways.
+OS, BusyBox, and radio interface (`ppp0` — IPv6-only PPP over `/dev/ttyS1` at
+500 000 baud) are identical on both gateways.
 
+<!-- markdownlint-disable line-length -->
 | Property | smart Gateway 19000 | smart Gateway 19005 |
-|---|---|---|
+| --- | --- | --- |
 | CPU | ARMv5TE (`armv5tejl`) | MediaTek MT7688 — MIPS 24KEc V5.5, MIPS32r2 |
 | C library ABI | hard-float | soft-float — glibc, libpthread, libm, libdl all compiled `-msoft-float` |
 | Rust target | `armv5te-unknown-linux-gnueabi` | `mipsel-unknown-linux-gnu` |
 | Build script | `./build-arm.sh` | `./build-mips.sh` |
-
+<!-- markdownlint-enable line-length -->
 ---
 
 ## Development setup (one-time)
 
 ### Prerequisites
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) — must be running for cross-compilation
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) — must be
+  running for cross-compilation
 - Rust toolchain via [rustup](https://rustup.rs)
-- `cross` — wraps `cargo` with Docker-based sysroots; no host C toolchain needed:
+- `cross` — wraps `cargo` with Docker-based sysroots; no host C toolchain
+  needed:
 
 ```bash
 cargo install cross
@@ -72,7 +80,8 @@ cargo install cross
 
 ### ARM target
 
-The ARM build uses a pre-compiled Rust standard library, so the target component must be installed:
+The ARM build uses a pre-compiled Rust standard library, so the target component
+must be installed:
 
 ```bash
 rustup target add armv5te-unknown-linux-gnueabi
@@ -80,7 +89,8 @@ rustup target add armv5te-unknown-linux-gnueabi
 
 ### MIPS target
 
-The MIPS build compiles `std` from source (`build-std`), so no target component is needed. Only a nightly toolchain with `rust-src` is required:
+The MIPS build compiles `std` from source (`build-std`), so no target component
+is needed. Only a nightly toolchain with `rust-src` is required:
 
 ```bash
 rustup toolchain install nightly
@@ -100,23 +110,39 @@ cargo clippy
 
 ### Release build
 
-Both scripts accept an optional `root@<ip>` argument to deploy immediately after building:
+Both scripts accept an optional `root@<ip>` argument to deploy immediately after
+building:
 
 ```bash
 ./build-arm.sh [root@192.168.1.x]   # GARDENA smart Gateway (ARM)
 ./build-mips.sh [root@192.168.1.x]  # LCGW / MT7688 (MIPS)
 ```
 
-The MIPS script additionally patches two ELF fields that encode the float ABI after linking (see [MIPS cross-compilation notes](#mips-cross-compilation-notes)).
+The MIPS script additionally patches two ELF fields that encode the float ABI
+after linking (see [MIPS cross-compilation
+notes](#mips-cross-compilation-notes)).
 
 ### Release profile
 
-The `[profile.release]` in `Cargo.toml` includes `panic = "abort"`. With this setting:
+The `[profile.release]` in `Cargo.toml` includes `panic = "abort"`. With this
+setting:
 
-- **Binary size**: unwinding tables (`.ARM.extab` / `.MIPS.eh_frame`) and landing-pad code are eliminated. On ARM this removed ~221 KB (12%) from the binary.
-- **Panic behaviour**: a panic still prints its message to stderr, then calls `abort()`. The process terminates and systemd restarts it — the same outcome as an unwinding panic for this service.
-- **No per-frame cleanup on panic**: `Drop` implementations are not called for locals on the panicking call stack. For this service the practical consequences are benign: file descriptors are closed by the OS, and the atomic-write pattern (write to `.tmp` → rename) ensures persistence files are never left in a corrupt state.
-- **Tokio task isolation**: tokio uses `catch_unwind` internally to isolate panicking tasks. With `panic = "abort"`, that catch is bypassed and a panic in any task kills the whole process. This matches the existing design intent — the `tokio::select!` in `main` already brings down the process on any task error.
+- **Binary size**: unwinding tables (`.ARM.extab` / `.MIPS.eh_frame`) and
+  landing-pad code are eliminated. On ARM this removed ~221 KB (12%) from the
+  binary.
+- **Panic behaviour**: a panic still prints its message to stderr, then calls
+  `abort()`. The process terminates and systemd restarts it — the same outcome
+  as an unwinding panic for this service.
+- **No per-frame cleanup on panic**: `Drop` implementations are not called for
+  locals on the panicking call stack. For this service the practical
+  consequences are benign: file descriptors are closed by the OS, and the
+  atomic-write pattern (write to `.tmp` → rename) ensures persistence files are
+  never left in a corrupt state.
+- **Tokio task isolation**: tokio uses `catch_unwind` internally to isolate
+  panicking tasks. With `panic = "abort"`, that catch is bypassed and a panic in
+  any task kills the whole process. This matches the existing design intent —
+  the `tokio::select!` in `main` already brings down the process on any task
+  error.
 
 ---
 
@@ -133,9 +159,9 @@ lwm2mserver-rs ppp0 --bind-to-device \
 Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2mserver_rs=debug`.
 
 ### Arguments
-
+<!-- markdownlint-disable line-length -->
 | Argument | Required | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `<interface>` | yes | — | Network interface for CoAP traffic (e.g. `ppp0`) |
 | `--bind-to-device` | no | off | Bind CoAP socket to the interface via `SO_BINDTODEVICE` |
 | `--server-uri` | no | `coap://[fc00::6:100:0:0]` | This server's CoAP URI written to devices during bootstrap |
@@ -143,12 +169,13 @@ Log level is controlled via `RUST_LOG`, e.g. `RUST_LOG=lwm2mserver_rs=debug`.
 | `--lb-key-file` | no | `/var/lib/lemonbeatd/…/Network_key.json` | JSON file containing `"network_key"` as a hex string |
 | `--ipso-directories` | no | _(none)_ | One or more directories containing IPSO object definition XML files (space-separated). All `*.xml` files in each directory are loaded at startup and used to translate `/dp` payloads into named, typed events. |
 | `RUST_LOG` | no | `lwm2mserver_rs=info` | Log filter (env var) |
-
+<!-- markdownlint-enable line-length -->
 ---
 
 ## IPC sockets
 
-The gateway exposes two Unix domain sockets for integration with local processes. All messages are newline-terminated JSON arrays.
+The gateway exposes two Unix domain sockets for integration with local
+processes. All messages are newline-terminated JSON arrays.
 
 ### Command socket — `/tmp/lwm2mserver-command.ipc`
 
@@ -163,21 +190,26 @@ Returns accumulated IPSO state for each included device.
 ```
 
 Response:
+
 ```json
 [{"payload":{"<sgtin>":{"device":{"_urn":"…","0":{…}}}},"success":true}]
 ```
 
 #### Approve device inclusion
 
-After a device sends its first `/bs` request its certificate is read and an `includable_device` event is emitted (see Event socket below). To allow the device to join the network, send:
+After a device sends its first `/bs` request its certificate is read and an
+`includable_device` event is emitted (see Event socket below). To allow the
+device to join the network, send:
 
 ```json
 [{"op":"execute","entity":{"service":"lwm2mserver","path":"includable_device/<id>/include"}}]
 ```
 
-where `<id>` is the numeric identifier from the event. The approval is stored; the write phase starts automatically on the device's next `/bs` request.
+where `<id>` is the numeric identifier from the event. The approval is stored;
+the write phase starts automatically on the device's next `/bs` request.
 
 Response:
+
 ```json
 [{"success":true}]
 ```
@@ -186,7 +218,9 @@ Returns `{"success":false}` if `<id>` is not known.
 
 #### Execute a device resource
 
-Sends a CoAP Execute to the named resource on a registered device. `path` uses the IPSO object and resource names from the loaded XML definitions, separated by `/`.
+Sends a CoAP Execute to the named resource on a registered device. `path` uses
+the IPSO object and resource names from the loaded XML definitions, separated by
+`/`.
 
 ```json
 [{"op":"execute","entity":{"device":"<sgtin>","path":"<object>/<instance>/<resource>"},"payload":{}}]
@@ -199,31 +233,38 @@ Example — trigger an RF link measurement:
 ```
 
 Response on success:
+
 ```json
 [{"metadata":{"lwm2m_client_id":1,"lwm2m_uri":[12345,0,1],"lwm2m_response":"CHANGED","lwm2m_response_code":68},"success":true}]
 ```
 
-To pass an argument, include `"as"` in the payload: `{"payload":{"as":["value"]}}`.
+To pass an argument, include `"as"` in the payload:
+`{"payload":{"as":["value"]}}`.
 
 #### Write a device resource
 
-Sends a CoAP Write (PUT) to the named resource. The value is type-tagged using the standard value keys.
+Sends a CoAP Write (PUT) to the named resource. The value is type-tagged using
+the standard value keys.
 
 ```json
 [{"op":"write","entity":{"device":"<sgtin>","path":"<object>/<instance>/<resource>"},"payload":{"vi":42}}]
 ```
 
-Supported payload keys: `vs` (string), `vi` (integer), `vf` (float), `vb` (boolean), `vt` (time/integer), `vo` (opaque/base64).
+Supported payload keys: `vs` (string), `vi` (integer), `vf` (float), `vb`
+(boolean), `vt` (time/integer), `vo` (opaque/base64).
 
 ---
 
 ### Event socket — `/tmp/lwm2mserver-event.ipc`
 
-Emits events to all connected listeners as newline-terminated JSON arrays. Connect and read lines; the socket stays open and streams events as they occur.
+Emits events to all connected listeners as newline-terminated JSON arrays.
+Connect and read lines; the socket stays open and streams events as they occur.
 
 #### Includable device event
 
-Emitted on **every** `/bs` request from a device that has not yet been fully included. The event repeats as long as the device keeps sending `/bs` (approximately every 5 seconds while in bootstrap mode).
+Emitted on **every** `/bs` request from a device that has not yet been fully
+included. The event repeats as long as the device keeps sending `/bs`
+(approximately every 5 seconds while in bootstrap mode).
 
 ```json
 [{
@@ -238,11 +279,17 @@ Emitted on **every** `/bs` request from a device that has not yet been fully inc
 }]
 ```
 
-Once the user has approved and the write phase has started, `inclusion_started` becomes `true`. When the write phase finishes successfully, a final event with both `inclusion_started` and `inclusion_completed` set to `true` is emitted.
+Once the user has approved and the write phase has started, `inclusion_started`
+becomes `true`. When the write phase finishes successfully, a final event with
+both `inclusion_started` and `inclusion_completed` set to `true` is emitted.
 
 #### Device data event
 
-Emitted when a registered device pushes a `/dp` (data push) payload. Object and resource names come from the IPSO XML definitions loaded via `--ipso-directories`. Each resource value uses a type-tagged key (`vi` integer, `vf` float, `vs` string, `vb` boolean, `vt` time, `vo` opaque/base64; arrays use `ai`, `af`, `as`, `ab`, `ao`).
+Emitted when a registered device pushes a `/dp` (data push) payload. Object and
+resource names come from the IPSO XML definitions loaded via
+`--ipso-directories`. Each resource value uses a type-tagged key (`vi` integer,
+`vf` float, `vs` string, `vb` boolean, `vt` time, `vo` opaque/base64; arrays use
+`ai`, `af`, `as`, `ab`, `ao`).
 
 ```json
 [{
@@ -264,7 +311,10 @@ Emitted when a registered device pushes a `/dp` (data push) payload. Object and 
 
 #### Connection status event
 
-Emitted whenever a device transitions between online and offline. An initial online event fires when a device first registers or contacts the server after being offline. An offline event fires when a CoAP request to the device fails (send error or CON timeout after retransmission).
+Emitted whenever a device transitions between online and offline. An initial
+online event fires when a device first registers or contacts the server after
+being offline. An offline event fires when a CoAP request to the device fails
+(send error or CON timeout after retransmission).
 
 ```json
 [{
@@ -280,7 +330,9 @@ Emitted whenever a device transitions between online and offline. An initial onl
 
 #### Device deleted event
 
-Emitted when a device sends a CoAP `DELETE /rd/<id>` (factory reset / self-deregistration). The device is removed from the registry and its persisted state is deleted.
+Emitted when a device sends a CoAP `DELETE /rd/<id>` (factory reset /
+self-deregistration). The device is removed from the registry and its persisted
+state is deleted.
 
 ```json
 [{
@@ -294,89 +346,129 @@ Emitted when a device sends a CoAP `DELETE /rd/<id>` (factory reset / self-dereg
 
 ## Bootstrap / device inclusion protocol
 
-Devices enter bootstrap mode to receive provisioning credentials (server URI, network key). The flow requires explicit user approval for each inclusion.
+Devices enter bootstrap mode to receive provisioning credentials (server URI,
+network key). The flow requires explicit user approval for each inclusion.
 
 ### IPv6 Traffic Class
 
-The radio module uses the IPv6 Traffic Class byte to control MAC-layer encryption:
+The radio module uses the IPv6 Traffic Class byte to control MAC-layer
+encryption:
 
 | TC | Meaning |
-|---|---|
+| --- | --- |
 | `0x0c` | No MAC encryption — used before the network key is exchanged |
 | `0x1c` | MAC encryption active — used after bootstrap completes |
 
-All bootstrap packets (server → device) are sent with TC=0x0c. All post-bootstrap traffic (registration responses, data push ACKs) uses TC=0x1c.
+All bootstrap packets (server → device) are sent with TC=0x0c. All
+post-bootstrap traffic (registration responses, data push ACKs) uses TC=0x1c.
 
 ### Step 1 — certificate read
 
-1. Device sends `CON POST /bs?ep=<name>` repeatedly (~every 5 s). The server does **not** ACK.
-2. On the first `/bs` the server waits 3 seconds (to let the device open its receive socket), then sends `CON GET /0/0` with TC=0x0c to read the device's X.509 certificate.
-3. The device ACKs with its certificate payload. The server extracts and caches the P-256 public key permanently (it never changes for a given device, so it is not re-read on subsequent bootstrap attempts).
-4. Every `/bs` — including those received while waiting for the cert and those received after — emits an `includable_device` event on the event socket.
+1. Device sends `CON POST /bs?ep=<name>` repeatedly (~every 5 s). The server
+   does **not** ACK.
+2. On the first `/bs` the server waits 3 seconds (to let the device open its
+   receive socket), then sends `CON GET /0/0` with TC=0x0c to read the device's
+   X.509 certificate.
+3. The device ACKs with its certificate payload. The server extracts and caches
+   the P-256 public key permanently (it never changes for a given device, so it
+   is not re-read on subsequent bootstrap attempts).
+4. Every `/bs` — including those received while waiting for the cert and those
+   received after — emits an `includable_device` event on the event socket.
 
 ### Step 2 — user approval
 
-The local application receives `includable_device` events and presents the device to the user. When the user approves, the application sends the `execute includable_device/<id>/include` IPC command. The gateway stores the approval; no immediate action is taken.
+The local application receives `includable_device` events and presents the
+device to the user. When the user approves, the application sends the `execute
+includable_device/<id>/include` IPC command. The gateway stores the approval; no
+immediate action is taken.
 
 ### Step 3 — credential write
 
 On the next `/bs` received after approval has been stored:
 
-1. Server sends `2.04 Changed` ACK (TC=0x0c) — this is the **only** `/bs` that is ever ACKed.
+1. Server sends `2.04 Changed` ACK (TC=0x0c) — this is the **only** `/bs` that
+   is ever ACKed.
 2. The approval is consumed (a second factory reset requires re-approval).
-3. Server executes the write sequence — all packets are CON with TC=0x0c, each waits for device ACK before proceeding (RFC 7252: 2 s initial timeout, up to 4 retries, exponential backoff):
+3. Server executes the write sequence — all packets are CON with TC=0x0c, each
+   waits for device ACK before proceeding (RFC 7252: 2 s initial timeout, up to
+   4 retries, exponential backoff):
 
+<!-- markdownlint-disable line-length -->
 | Step | Operation | Path | Content |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | `DELETE` | `/1` | Clear existing Server Object instances |
 | 2 | `PUT` | `/1/1` | Short Server ID=1, Lifetime=86400, Binding="U" (SenML+CBOR) |
 | 3 | `DELETE` | `/0` | Clear existing Security Object instances |
 | 4 | `PUT` | `/0/1` | Server URI, server public key, encrypted network key (SenML+CBOR) |
 | 5 | `POST` | `/bs` | Bootstrap finish signal |
+<!-- markdownlint-enable line-length -->
 
 After the device ACKs `POST /bs` it switches to encrypted traffic (TC=0x1c).
 
 ### Credentials
 
-- **Server public key**: an ephemeral P-256 keypair is generated at process startup. The compressed 33-byte public key is written to `/0/1/4`.
-- **Network key**: a 16-byte key read from the JSON file passed via `--lb-key-file`. The file must contain a `"network_key"` field as a lowercase hex string:
+- **Server public key**: an ephemeral P-256 keypair is generated at process
+  startup. The compressed 33-byte public key is written to `/0/1/4`.
+- **Network key**: a 16-byte key read from the JSON file passed via
+  `--lb-key-file`. The file must contain a `"network_key"` field as a lowercase
+  hex string:
 
 ```json
 { "network_key": "be3960fa8ccd1e306e579096dcecc0d6" }
 ```
 
-The key is ECDH-encrypted per device: AES-128-ECB using the first 16 bytes of the ECDH shared secret (server ephemeral private key × device P-256 public key from its X.509 certificate). Plaintext structure: 14 random bytes ‖ 16-byte key ‖ 2-byte CRC-16/XMODEM.
+The key is ECDH-encrypted per device: AES-128-ECB using the first 16 bytes of
+the ECDH shared secret (server ephemeral private key × device P-256 public key
+from its X.509 certificate). Plaintext structure: 14 random bytes ‖ 16-byte key
+‖ 2-byte CRC-16/XMODEM.
 
 ---
 
 ## Connection status tracking
 
-The server maintains an online/offline status for each registered device and emits `connection_status` events on transitions.
+The server maintains an online/offline status for each registered device and
+emits `connection_status` events on transitions.
 
-**Going offline**: a device is marked offline when a CON request to it exhausts all retransmits (RFC 7252 default: 3 retransmits, 2 s initial timeout with exponential backoff) or when a UDP send fails at the socket level.
+**Going offline**: a device is marked offline when a CON request to it exhausts
+all retransmits (RFC 7252 default: 3 retransmits, 2 s initial timeout with
+exponential backoff) or when a UDP send fails at the socket level.
 
-**Coming online**: any inbound CoAP packet from a device (registration, heartbeat, data push, ACK) marks it online.
+**Coming online**: any inbound CoAP packet from a device (registration,
+heartbeat, data push, ACK) marks it online.
 
-**Proactive connectivity pings**: the housekeeping task sends a CoAP Execute to `sg_common/0/measure_rf_link` (instance 0) as a low-cost ping to detect status changes proactively:
+**Proactive connectivity pings**: the housekeeping task sends a CoAP Execute to
+`sg_common/0/measure_rf_link` (instance 0) as a low-cost ping to detect status
+changes proactively:
 
-- **Offline device**: pinged every 15 minutes for the first 6 hours after going offline.
-- **Online device**: pinged once per day when no other communication has occurred.
+- **Offline device**: pinged every 15 minutes for the first 6 hours after going
+  offline.
+- **Online device**: pinged once per day when no other communication has
+  occurred.
 
-Any real CoAP interaction (inbound or outbound) resets these timers so pings are suppressed while the device is actively communicating. At startup, all restored devices are in the offline state and are pinged on the first housekeeping tick (60 s after start) to establish current status.
+Any real CoAP interaction (inbound or outbound) resets these timers so pings are
+suppressed while the device is actively communicating. At startup, all restored
+devices are in the offline state and are pinged on the first housekeeping tick
+(60 s after start) to establish current status.
 
 ---
 
 ## IPSO object definitions
 
-When `--ipso-directories` is specified, the gateway loads all `*.xml` files matching the OMA LWM2M object definition schema. These are used to:
+When `--ipso-directories` is specified, the gateway loads all `*.xml` files
+matching the OMA LWM2M object definition schema. These are used to:
 
-- Resolve numeric object/resource IDs to human-readable names in `/dp` event payloads
+- Resolve numeric object/resource IDs to human-readable names in `/dp` event
+  payloads
 - Determine correct value types (integer, float, string, boolean, time, opaque)
 - Detect multi-instance resources (encoded as JSON arrays `ai`/`af`/`as`/…)
-- Select the correct `_urn` based on the object version declared by the device at registration
+- Select the correct `_urn` based on the object version declared by the device
+  at registration
 - Resolve resource names in IPC execute/write commands to numeric LWM2M IDs
 
-The `<ObjectVersion>` element in each XML file is used as the version key. If a device registered with `ver=1.1` for object 3, the definition from the file containing `<ObjectVersion>1.1</ObjectVersion>` is used. Files without an `<ObjectVersion>` element are used as the unversioned fallback.
+The `<ObjectVersion>` element in each XML file is used as the version key. If a
+device registered with `ver=1.1` for object 3, the definition from the file
+containing `<ObjectVersion>1.1</ObjectVersion>` is used. Files without an
+`<ObjectVersion>` element are used as the unversioned fallback.
 
 ---
 
@@ -384,45 +476,75 @@ The `<ObjectVersion>` element in each XML file is used as the version key. If a 
 
 The server persists state to `/var/lib/lwm2mserver/` across restarts:
 
+<!-- markdownlint-disable line-length -->
 | File | Contents |
-|---|---|
+| --- | --- |
 | `wakaama.json` | Registered device snapshots (endpoint, address, lifetime, object versions). Written atomically on every registration and heartbeat. Expired entries are skipped on load. |
 | `included_devices.json` | List of included device endpoints. Written on inclusion and exclusion. |
 | `devices/<sgtin>.json` | Accumulated IPSO state per device from `/dp` payloads. Written on every data push. Deleted on device factory reset. |
+<!-- markdownlint-enable line-length -->
 
-All writes are atomic (write to `.tmp`, then `rename`). On startup, restored devices are placed in the offline state regardless of their persisted status; the connectivity ping mechanism determines their actual online state within the first minute.
+All writes are atomic (write to `.tmp`, then `rename`). On startup, restored
+devices are placed in the offline state regardless of their persisted status;
+the connectivity ping mechanism determines their actual online state within the
+first minute.
 
 ---
 
 ## MIPS cross-compilation notes
 
-Getting a binary that runs on the MT7688 soft-float glibc userspace required working around three independent problems in the toolchain.
+Getting a binary that runs on the MT7688 soft-float glibc userspace required
+working around three independent problems in the toolchain.
 
 ### 1. No soft-float multilib in the Debian cross toolchain
 
-The `cross` Docker image for `mipsel-unknown-linux-gnu` (based on Debian's `gcc-mipsel-linux-gnu` package) ships only a single sysroot — hard-float / FPXX. There is no soft-float multilib, so passing `-msoft-float` to the GCC linker driver has no effect: it still links against the FPXX `Scrt1.o` startup file.
+The `cross` Docker image for `mipsel-unknown-linux-gnu` (based on Debian's
+`gcc-mipsel-linux-gnu` package) ships only a single sysroot — hard-float / FPXX.
+There is no soft-float multilib, so passing `-msoft-float` to the GCC linker
+driver has no effect: it still links against the FPXX `Scrt1.o` startup file.
 
-**Workaround**: The Rust code itself is compiled soft-float via `target-feature=+soft-float`. `Scrt1.o` contains only ABI-agnostic startup code (stack setup, calling `main`) with no actual floating-point instructions; the only thing wrong is the ELF attribute it contributes. After the build, `build-mips.sh` patches the two ELF fields that encode the float ABI:
+**Workaround**: The Rust code itself is compiled soft-float via
+`target-feature=+soft-float`. `Scrt1.o` contains only ABI-agnostic startup code
+(stack setup, calling `main`) with no actual floating-point instructions; the
+only thing wrong is the ELF attribute it contributes. After the build,
+`build-mips.sh` patches the two ELF fields that encode the float ABI:
 
-- `PT_MIPS_ABIFLAGS.fp_abi` (byte 7 of the `PT_MIPS_ABIFLAGS` segment) — **this is what glibc's `ld.so` actually checks at runtime**.
-- `.gnu.attributes` section, `Tag_GNU_MIPS_ABI_FP` — informational; patched for consistency.
+- `PT_MIPS_ABIFLAGS.fp_abi` (byte 7 of the `PT_MIPS_ABIFLAGS` segment) — **this
+  is what glibc's `ld.so` actually checks at runtime**.
+- `.gnu.attributes` section, `Tag_GNU_MIPS_ABI_FP` — informational; patched for
+  consistency.
 
-Both are changed from `5` (FPXX / `Val_GNU_MIPS_ABI_FP_XX`) to `3` (soft-float / `Val_GNU_MIPS_ABI_FP_SOFT`).
+Both are changed from `5` (FPXX / `Val_GNU_MIPS_ABI_FP_XX`) to `3` (soft-float /
+`Val_GNU_MIPS_ABI_FP_SOFT`).
 
-> **Note**: glibc's `ld.so` reads `PT_MIPS_ABIFLAGS`, not `.gnu.attributes`. Patching only `.gnu.attributes` is insufficient.
+> **Note**: glibc's `ld.so` reads `PT_MIPS_ABIFLAGS`, not `.gnu.attributes`.
+> Patching only `.gnu.attributes` is insufficient.
 
 ### 2. `libgcc_s.so.1` runtime dependency
 
-Rust's `unwind` crate always emits `cargo:rustc-link-lib=gcc_s` (dynamic link), pulling in `libgcc_s.so.1` regardless of `panic = "abort"`. The MT7688 has only a hard-float `libgcc_s.so.1` — the only file on the system with a mismatched float ABI — so the dynamic linker rejects it.
+Rust's `unwind` crate always emits `cargo:rustc-link-lib=gcc_s` (dynamic link),
+pulling in `libgcc_s.so.1` regardless of `panic = "abort"`. The MT7688 has only
+a hard-float `libgcc_s.so.1` — the only file on the system with a mismatched
+float ABI — so the dynamic linker rejects it.
 
 **Workaround**: Two parts:
-1. `src/unwind_stubs.rs` provides no-op `#[no_mangle]` implementations of every `_Unwind_*` symbol that would otherwise come from `libgcc_s.so.1`. These are compiled by rustc for the correct soft-float ABI.
-2. `build.rs` writes a fake `libgcc_s.so` linker script to `$OUT_DIR` (which takes precedence in the link search path). When the linker resolves `-lgcc_s` it finds this empty script first, so `libgcc_s.so.1` is never added to `DT_NEEDED`.
-3. `--as-needed` in `rustflags` provides a belt-and-suspenders: shared libraries with no unresolved symbol references (which is the case after our stubs satisfy all `_Unwind_*`) are excluded from `DT_NEEDED`.
+
+1. `src/unwind_stubs.rs` provides no-op `#[no_mangle]` implementations of every
+   `_Unwind_*` symbol that would otherwise come from `libgcc_s.so.1`. These are
+   compiled by rustc for the correct soft-float ABI.
+2. `build.rs` writes a fake `libgcc_s.so` linker script to `$OUT_DIR` (which
+   takes precedence in the link search path). When the linker resolves `-lgcc_s`
+   it finds this empty script first, so `libgcc_s.so.1` is never added to
+   `DT_NEEDED`.
+3. `--as-needed` in `rustflags` provides a belt-and-suspenders: shared libraries
+   with no unresolved symbol references (which is the case after our stubs
+   satisfy all `_Unwind_*`) are excluded from `DT_NEEDED`.
 
 ### 3. `build-std` requires nightly Rust
 
-No pre-built `rust-std` artifact exists for `mipsel-unknown-linux-gnu`, so `std` must be compiled from source via `build-std`. This is configured in `Cross.toml`:
+No pre-built `rust-std` artifact exists for `mipsel-unknown-linux-gnu`, so `std`
+must be compiled from source via `build-std`. This is configured in
+`Cross.toml`:
 
 ```toml
 [target.mipsel-unknown-linux-gnu]
@@ -434,8 +556,8 @@ build-std = ["std", "panic_abort"]
 ---
 
 ## Project layout
-
-```
+<!-- markdownlint-disable line-length -->
+```text
 src/
 ├── main.rs           Entry point. Spawns long-running tasks under a shared
 │                     CancellationToken; any task failure brings down the process
@@ -533,18 +655,19 @@ src/
                         (systemd). Emits structured data in the bnw@55029 SD-ID;
                         suppresses the plain fmt layer to avoid duplicate output.
 ```
-
+<!-- markdownlint-enable line-length -->
 ### Task topology
 
-```
+<!-- markdownlint-disable line-length -->
+```text
                       ┌──────────────────────────────────────┐
-UDP :20017 ───────────►│ lwm2m::server (inbound CoAP)         │
+UDP :20017 ──────────►│ lwm2m::server (inbound CoAP)         │
                       │   recv_from loop                     │──► coap_dispatch_tx
                       │   /bs / /rd / /dp / DELETE / ACK/RST │──► event_sender (broadcast)
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
-                      │ lwm2m::client (outbound CoAP)         │◄── coap_dispatch_tx
+                      │ lwm2m::client (outbound CoAP)        │◄── coap_dispatch_tx
                       │   send CON requests, retransmit loop │──► event_sender (connection_status)
                       └──────────────────────────────────────┘
 
@@ -559,8 +682,9 @@ UDP :20017 ───────────►│ lwm2m::server (inbound CoAP) 
                       └──────────────────────────────────────┘
 
                       ┌──────────────────────────────────────┐
-                      │ housekeeping (60 s interval)          │
+                      │ housekeeping (60 s interval)         │
                       │   expire registrations, timeout ops, │──► coap_dispatch_tx
-                      │   connectivity pings                  │
+                      │   connectivity pings                 │
                       └──────────────────────────────────────┘
 ```
+<!-- markdownlint-enable line-length -->
