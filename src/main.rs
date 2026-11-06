@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: GARDENA GmbH
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::path::PathBuf;
 
 use sd_notify::NotifyState;
@@ -52,6 +56,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Config::from_args().map_err(|e| anyhow::anyhow!("{e}"))?;
+    if cfg.no_encryption {
+        warn!("Encryption disabled: sending all traffic unencrypted");
+        lwm2m::disable_tclass();
+    }
     let ipso = load_shared(&cfg.ipso_directories);
     let registry = DeviceRegistry::new();
     let bootstrap_registry =

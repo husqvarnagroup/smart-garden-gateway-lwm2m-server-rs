@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: GARDENA GmbH
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Only with panic=abort; with panic=unwind the real unwinder (libgcc_s) is
 // linked and these stubs would shadow it.
 #[cfg(all(target_arch = "mips", panic = "abort"))]

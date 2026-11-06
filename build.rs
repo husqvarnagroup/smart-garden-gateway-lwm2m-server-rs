@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: GARDENA GmbH
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 fn main() {
     // On MIPS (MT7688 gateway), the system userspace is soft-float, but the only
     // libgcc_s.so.1 on the device is hard-float — a mismatch the dynamic linker rejects.
