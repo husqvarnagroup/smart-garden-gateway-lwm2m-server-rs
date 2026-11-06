@@ -452,10 +452,8 @@ async fn handle_registration(
         .map_err(|e| crate::error::Error::Coap(format!("{e:?}")))?;
     send_encrypted_packet(socket, &bytes, addr).await?;
 
-    info!(device = %endpoint, id, %addr, activity = "registration", "Device registered");
-
     if !bootstrap_registry.is_included(&endpoint).await {
-        warn!(device = %endpoint, activity = "registration", "Device not included — triggering factory reset");
+        info!(activity = "registration", device = %endpoint, "Device registered but is not included. Sending factory reset");
 
         let (response_tx, _) = oneshot::channel();
         let op = PendingOperation::new(
@@ -486,6 +484,8 @@ async fn handle_registration(
 
         return Ok(());
     }
+
+    info!(activity = "registration", device = %endpoint, "Device registered");
 
     let snapshots = registry.snapshot().await;
     let ps = Arc::clone(persistence);
