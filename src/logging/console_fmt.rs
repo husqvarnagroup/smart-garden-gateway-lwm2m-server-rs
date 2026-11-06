@@ -14,7 +14,7 @@ use tracing_subscriber::{
     registry::LookupSpan,
 };
 
-/// Event formatter: `TIMESTAMP LEVEL target: [k=v k=v] message`
+/// Event formatter: `TIMESTAMP LEVEL target: [k="v" k=v] message`. Text values are quoted.
 #[derive(Default)]
 pub struct PrefixedFields {
     timer: SystemTime,
@@ -78,6 +78,10 @@ fn level_color(level: Level) -> &'static str {
     }
 }
 
+fn quoted(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 #[derive(Default)]
 struct Visitor {
     message: String,
@@ -89,7 +93,7 @@ impl tracing::field::Visit for Visitor {
         if field.name() == "message" {
             self.message = value.to_owned();
         } else {
-            self.fields.push((field.name(), value.to_owned()));
+            self.fields.push((field.name(), quoted(value)));
         }
     }
 
